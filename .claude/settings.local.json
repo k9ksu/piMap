@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip3 install *)",
+      "Bash(python3 -c \"import iss_tracker\")",
+      "Bash(python3 -c \"from sgp4.api import Satrec, jday; print\\('sgp4 OK'\\)\")",
+      "Bash(python3 -c ' *)",
+      "Bash(curl -sS --max-time 10 \"https://www.hamqsl.com/solarxml.php\")",
+      "Bash(curl -sSL --max-time 120 -o /tmp/bmng_21600x10800.jpg \"https://assets.science.nasa.gov/content/dam/science/esd/eo/images/bmng/bmng-base/june/world.200406.3x21600x10800.jpg\")",
+      "Read(//tmp/**)"
+    ]
+  }
+}

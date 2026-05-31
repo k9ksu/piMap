@@ -1,0 +1,29 @@
+# --- Secrets / local config (contains live QRZ API key) ---
+config.py
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# --- Runtime data / logs ---
+logs/
+*.log
+*.log.*
+
+# --- Caches that shouldn't be in source control ---
+data/*_cache.json
+data/*_cache.txt
+
+# --- OS / editor cruft ---
+.DS_Store
+*.swp
+*~
+.vscode/
+.idea/
+
+# stray editor backup
+config.py.bak
+*.bak
