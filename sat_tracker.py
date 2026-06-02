@@ -21,14 +21,18 @@ import applog
 
 _TLE_URL = "https://celestrak.org/NORAD/elements/gp.php?GROUP=amateur&FORMAT=tle"
 _TLE_CACHE_PATH = os.path.join(os.path.dirname(__file__), "data", "amateur_tle_cache.txt")
-_TLE_REFRESH_S = 6 * 3600   # refresh the TLE set every 6 hours
+_TLE_REFRESH_S = 6 * 3600   # refresh the TLE set every 6 hours when healthy
+_TLE_RETRY_S = 15 * 60      # while degraded, re-attempt the fetch this often
+_TLE_FAIL_LIMIT = 6         # consecutive failures before the tag escalates to red
 _TRACK_CACHE_S = 1.0        # reuse a computed ground track for this long
 
 _log = applog.get_logger("sat")
 _lock = threading.Lock()
 _tles = {}            # norad(int) -> (name, line1, line2)
 _satrecs = {}         # norad(int) -> Satrec
-_tles_loaded_at = 0.0
+_tles_loaded_at = 0.0   # last *successful* fresh load; drives the 6h cadence
+_last_attempt_at = 0.0  # last fetch attempt (ok or fail); drives the 15m retry
+_fetch_failures = 0     # consecutive failed fetches; >=_TLE_FAIL_LIMIT -> red
 _track_cache = {}     # norad(int) -> (computed_at_realtime, [(lat, lon), ...])
 
 
@@ -65,6 +69,9 @@ def _set_tles(tles):
 
 
 def _load():
+    global _fetch_failures, _last_attempt_at
+    # Fast path: a fresh on-disk cache (e.g. written by a sibling run) counts
+    # as a clean success without touching the network.
     if os.path.exists(_TLE_CACHE_PATH):
         age = time.time() - os.path.getmtime(_TLE_CACHE_PATH)
         if age < _TLE_REFRESH_S:
@@ -72,23 +79,38 @@ def _load():
                 tles = _parse_group(f.read())
             if tles:
                 _set_tles(tles)
+                _fetch_failures = 0
+                _last_attempt_at = time.time()
                 applog.set_status("tle", "ok", f"{len(tles)} sats, cache {int(age/60)}m")
                 _log.info("TLEs: loaded %d sats from cache (age %dm)", len(tles), int(age / 60))
                 return
+    _last_attempt_at = time.time()
     try:
         tles = _fetch()
         _set_tles(tles)
+        _fetch_failures = 0
         applog.set_status("tle", "ok", f"{len(tles)} sats, fresh")
         _log.info("TLEs: fetched %d sats fresh", len(tles))
+        return
     except Exception as e:
-        if os.path.exists(_TLE_CACHE_PATH):
+        _fetch_failures += 1
+        # Keep serving whatever set we already have (in memory, or the on-disk
+        # cache on a cold-start failure). Below _TLE_FAIL_LIMIT this is a
+        # transient "stale"; at/after it escalates to "failed" (red). Either
+        # way the retry cadence drops to _TLE_RETRY_S until a fetch succeeds.
+        if not _tles and os.path.exists(_TLE_CACHE_PATH):
             with open(_TLE_CACHE_PATH) as f:
                 tles = _parse_group(f.read())
             if tles:
                 _set_tles(tles)
-                applog.set_status("tle", "stale", str(e))
-                _log.warning("TLE fetch failed (%s); using stale cache (%d sats)", e, len(tles))
-                return
+        if _tles:
+            state = "failed" if _fetch_failures >= _TLE_FAIL_LIMIT else "stale"
+            applog.set_status("tle", state, f"{_fetch_failures} fails: {e}")
+            _log.warning(
+                "TLE fetch failed (#%d, %s); serving cached %d sats [%s], retry in %dm",
+                _fetch_failures, e, len(_tles), state, int(_TLE_RETRY_S / 60),
+            )
+            return
         applog.set_status("tle", "failed", str(e))
         _log.error("TLEs unavailable, no cache: %s", e)
         raise
@@ -96,7 +118,15 @@ def _load():
 
 def _ensure_loaded():
     with _lock:
-        if not _tles or (time.time() - _tles_loaded_at) >= _TLE_REFRESH_S:
+        now = time.time()
+        if not _tles:
+            _load()
+        elif _fetch_failures > 0:
+            # Degraded: retry every _TLE_RETRY_S until a fetch succeeds. A fresh
+            # cache written by another process is picked up here too (fast path).
+            if now - _last_attempt_at >= _TLE_RETRY_S:
+                _load()
+        elif now - _tles_loaded_at >= _TLE_REFRESH_S:
             _load()
 
 
