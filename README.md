@@ -41,8 +41,10 @@ clock — all in a single full-screen [pygame](https://www.pygame.org/) app.
 git clone <your-repo-url> piMap
 cd piMap
 
-# 2. Python deps
-python3 -m pip install pygame requests sgp4 timezonefinder
+# 2. Python deps (Debian: prefer apt to satisfy PEP 668)
+sudo apt-get install -y python3-pygame python3-requests python3-sgp4 x11-xserver-utils
+#   or, in a venv:  pip install -r requirements.txt
+#   optional: timezonefinder (DST clock), Pillow (only for make_tiles.py)
 
 # 3. Configuration — copy the example and add your secrets
 cp config.example.py config.py
@@ -73,9 +75,31 @@ config local and never commit it.
 
 ## Running as a service
 
-piMap is intended to run under a `systemd --user` service that waits for X,
-places it on the right HDMI output, and restarts on failure. See your local
-`pimap.service` for the working setup.
+piMap runs under a `systemd --user` service ([deploy/pimap.service](deploy/pimap.service))
+that waits for the X server, places the window on the kiosk HDMI output, and
+restarts on failure. The quickest path is the installer:
+
+```bash
+./install.sh                          # deps + config.py + user service
+systemctl --user start pimap.service  # start it now
+journalctl --user -u pimap -f         # watch logs
+```
+
+The unit uses `%h`/`%t` so it's user-portable, assumes an X session on
+`DISPLAY :0`, and renders on **HDMI-2** (`--right-of HDMI-1`). Edit those lines
+in `deploy/pimap.service` (or the installed copy under
+`~/.config/systemd/user/`) for a different display layout.
+
+### Kiosk host notes (optional)
+
+The reference setup auto-logs into a minimal X session via lightdm and grants a
+couple of passwordless conveniences (restart lightdm, run `solaar`) through a
+sudoers drop-in — neither is required by piMap itself:
+
+```
+# /etc/sudoers.d/pimap   (use `sudo visudo -f` to edit)
+<user> ALL=(root) NOPASSWD: /usr/bin/systemctl start lightdm, /usr/bin/systemctl stop lightdm, /usr/bin/solaar
+```
 
 ## Map tiles
 
@@ -84,6 +108,11 @@ They can be regenerated with `make_tiles.py` from a high-res source image.
 
 ## License
 
-Personal project — add a license here if you intend others to reuse it.
+MIT — see [LICENSE](LICENSE).
+
+Bundled third-party assets keep their own licenses: the NASA Blue Marble imagery
+is public domain, and the fonts in `fonts/` (Anonymous Pro, B612 Mono, JetBrains
+Mono, Overpass Mono, Share Tech Mono, Space Mono) are distributed under their
+respective open-font licenses.
 
 73

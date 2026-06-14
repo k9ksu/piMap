@@ -1,0 +1,29 @@
+[Unit]
+Description=piMap ham QSO map (HDMI-2)
+# Best-effort ordering; the ExecStartPre wait below is what actually guarantees
+# the X server is ready, since a custom kiosk session does not reliably activate
+# graphical-session.target.
+After=graphical-session.target
+
+[Service]
+Type=simple
+# %h = your home dir, %t = your XDG runtime dir (/run/user/UID) — keeps this
+# portable across users. Adjust DISPLAY/HDMI below to your setup.
+Environment=DISPLAY=:0
+Environment=XAUTHORITY=%h/.Xauthority
+Environment=XDG_RUNTIME_DIR=%t
+WorkingDirectory=%h/projects/piMap
+# Wait (up to 60s) until the X server on :0 actually accepts connections,
+# so we don't race the lightdm autologin session at boot.
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 60); do xset q >/dev/null 2>&1 && exit 0; sleep 1; done; exit 1'
+# lightdm only auto-configures the primary output (HDMI-1) at boot, leaving
+# HDMI-2 connected-but-unconfigured. Enable it to the right of HDMI-1 so piMap
+# has a drawing area. Idempotent; '|| true' so a transient xrandr hiccup never
+# blocks the map from launching. Remove/edit if you render on a single display.
+ExecStartPre=/bin/sh -c 'xrandr --output HDMI-2 --mode 1920x1080 --right-of HDMI-1 || true'
+ExecStart=/usr/bin/python3 %h/projects/piMap/piMap.py
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

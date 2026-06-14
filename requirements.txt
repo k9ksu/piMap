@@ -1,0 +1,8 @@
+# piMap runtime dependencies (core)
+pygame
+requests
+sgp4
+
+# Optional:
+# timezonefinder   # DST-accurate local time in the header clock (graceful fallback if absent)
+# Pillow           # only needed to regenerate map tiles with make_tiles.py
