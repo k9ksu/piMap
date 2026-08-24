@@ -272,6 +272,271 @@ def draw_sat_bubble(surface, pos, name, lines, note, color, font_title, font_bod
         y += s.get_height() + gap
 
 
+_TARGET_STATE_COLORS = {
+    "green": (60, 200, 90),
+    "yellow": (235, 190, 40),
+    "red": (220, 70, 60),
+    "quiet": (210, 210, 214),  # nothing heard for a while — subtle, not alarming
+}
+_TARGET_GRAY = (150, 150, 156)
+
+
+def target_summary_color(state):
+    return _TARGET_STATE_COLORS.get(state, _TARGET_GRAY)
+
+
+_BAND_NAMES = {
+    -1: "2200m", 0: "630m", 1: "160m", 3: "80m", 5: "60m", 7: "40m",
+    10: "30m", 14: "20m", 18: "17m", 21: "15m", 24: "12m", 28: "10m",
+    50: "6m", 70: "4m", 144: "2m", 222: "1.25m", 430: "70cm",
+    902: "33cm", 1296: "23cm",
+}
+
+
+def _band_label(band):
+    """Fallback label for a band the WSPR side never reported (FT8 can see a
+    band WSPR_BANDS does not list, e.g. 2m)."""
+    return _BAND_NAMES.get(band, "%sMHz" % band)
+
+
+def _anchor_bubble(px, py, w, h, screen_w, top_margin):
+    """Place a bubble beside a marker, flipping left/down to stay on screen."""
+    bx = px + 14
+    by = py - h - 12
+    if bx + w > screen_w - 4:
+        bx = px - w - 14
+    if by < top_margin + 4:
+        by = py + 14
+    return max(4, bx), by
+
+
+def draw_target_detail_bubble(surface, pos, target, detail, font_title, font_body,
+                              screen_w, top_margin, pinned, mouse_pos=None,
+                              max_rows=6):
+    """Drill-down view for one (target, band) cell: which stations are actually
+    being heard on this path, one row per callsign, strongest first.
+
+    Two sections, because WSPR is one-directional per spot:
+      WE HEAR THEM  - a station in the target's field, spotted by a receiver
+                      in our grid field
+      THEY HEAR US  - a station in our field, spotted over there
+    Returns {"rect":..., "band_rows": [], "back": Rect} -- same contract as
+    draw_target_bubble so the caller can hit-test either view the same way."""
+    px, py = pos
+    pad, gap = 8, 4
+    body_h = font_body.get_height()
+
+    title = target.get("label") or target.get("field") or "target"
+    title_s = font_title.render("WSPR -> %s" % title, True, (255, 255, 255))
+    back_txt = "< back to bands"
+    back_s = font_body.render(back_txt, True, (150, 200, 245))
+    src = detail.get("source", "WSPR")
+    band_s = font_body.render(
+        "%s %s | home %s | %d min" % (src, detail.get("band_label", "?"),
+                                      detail.get("home_scope", "?"),
+                                      detail.get("window_min", 30)),
+        True, (150, 225, 165) if src == "FT8" else (150, 195, 235))
+
+    lines = []   # (surface, indent) -- built first so we can size the bubble
+    def add(text, color, indent=0):
+        lines.append((font_body.render(text, True, color), indent))
+
+    state = detail.get("state")
+    if state == "loading":
+        add("loading spots...", (150, 160, 175))
+    elif state == "error":
+        add("fetch failed:", (235, 120, 110))
+        add((detail.get("error") or "")[:46], (170, 130, 128))
+    else:
+        for key, heading, tint in (("hearing", "WE HEAR THEM", (150, 225, 165)),
+                                   ("heard_by", "THEY HEAR US", (150, 195, 235))):
+            group = detail.get(key) or []
+            n_spots = detail.get("n_in" if key == "hearing" else "n_out", 0)
+            if not group:
+                add("%s  --  nothing" % heading, (120, 122, 128))
+                continue
+            add("%s  (%d sta / %d spots)" % (heading, len(group), n_spots), tint)
+            for g in group[:max_rows]:
+                if "km" in g:          # WSPR rows know the path length
+                    txt = ("%-9s %-6s %+4d dB  x%-3d %2.0fm  %5d km"
+                           % (g["sign"][:9], (g["loc"] or "")[:6], g["best_snr"],
+                              g["count"], g["age_min"], g["km"]))
+                else:                  # FT8 rows name the local end instead
+                    txt = ("%-9s %-6s %+4d dB  x%-3d %3.1fm  %s"
+                           % (g["sign"][:9], (g["loc"] or "")[:6], g["best_snr"],
+                              g["count"], g["age_min"], (g.get("by") or "?")[:9]))
+                add(txt, (225, 230, 238), indent=8)
+            if len(group) > max_rows:
+                add("+%d more" % (len(group) - max_rows), (140, 145, 155), indent=8)
+    if detail.get("truncated"):
+        add("(spot cap reached - partial view)", (200, 170, 90))
+
+    head_w = back_s.get_width() + 18 + band_s.get_width()
+    w = max([title_s.get_width(), head_w] +
+            [ls.get_width() + ind for ls, ind in lines]) + pad * 2
+    h = (title_s.get_height() + gap + body_h + gap + 1 + gap
+         + sum(ls.get_height() + gap for ls, _ in lines) + pad * 2)
+
+    bx, by = _anchor_bubble(px, py, w, h, screen_w, top_margin)
+    bg = pygame.Surface((w, h), pygame.SRCALPHA)
+    bg.fill((10, 10, 14, 242))
+    surface.blit(bg, (bx, by))
+    pygame.draw.rect(surface,
+                     (110, 200, 130) if src == "FT8" else (110, 165, 215),
+                     pygame.Rect(bx, by, w, h), 3 if pinned else 2, border_radius=6)
+
+    y = by + pad
+    surface.blit(title_s, (bx + pad, y))
+    y += title_s.get_height() + gap
+
+    back_rect = pygame.Rect(bx + pad, y, back_s.get_width() + 8, body_h)
+    if back_rect.collidepoint(mouse_pos or (-1, -1)):
+        pygame.draw.rect(surface, (34, 44, 58), back_rect.inflate(6, 2),
+                         border_radius=4)
+    surface.blit(back_s, (bx + pad, y))
+    surface.blit(band_s, (bx + w - pad - band_s.get_width(), y))
+    y += body_h + gap
+    pygame.draw.line(surface, (60, 70, 84), (bx + pad, y), (bx + w - pad, y), 1)
+    y += gap
+
+    for ls, ind in lines:
+        surface.blit(ls, (bx + pad + ind, y))
+        y += ls.get_height() + gap
+
+    return {"rect": pygame.Rect(bx, by, w, h), "band_rows": [], "back": back_rect}
+
+
+def draw_target_bubble(surface, pos, target, status, ft8_status, font_title,
+                       font_body, screen_w, top_margin, pinned, metros=None,
+                       mouse_pos=None):
+    """Hover/pinned bubble for a WSPR target dot: title, the largest metros in
+    its grid field, then a per-band table carrying BOTH sources side by side.
+
+    The two columns answer different questions and are deliberately not merged:
+      FT8   is the path open AND is anybody on it (PSKReporter, live)
+      WSPR  is the path physically open at all (beacons, 24/7)
+    A band can easily be green under one and blank under the other -- FT8 goes
+    quiet at 3am on a wide-open band, WSPR shows nothing on a band with no
+    beacons -- and which of those you are looking at matters.
+
+    Returns {"rect":..., "band_rows": [(band, source, Rect), ...], "back": None}
+    with one entry per CELL, so a click can drill into that source's spots."""
+    px, py = pos
+    pad, gap, dot_r, inner = 8, 4, 5, 8
+    ft8_status = ft8_status or {}
+
+    title = target.get("label") or target.get("field") or "target"
+    title_s = font_title.render("%s  [%s]" % (title, target.get("field", "??")),
+                                True, (255, 255, 255))
+
+    if metros is None:
+        metro_surfs = [font_body.render("cities loading...", True, (140, 142, 148))]
+    elif metros:
+        metro_surfs = [font_body.render("* %s" % m, True, (170, 195, 220)) for m in metros]
+    else:
+        metro_surfs = [font_body.render("no major metros", True, (140, 142, 148))]
+
+    wspr_by_band = {b.get("band"): b for b in status.get("bands", [])}
+    all_bands = sorted(set(wspr_by_band) | set(ft8_status),
+                       key=lambda b: (b is None, b))
+
+    def ft8_cell(band):
+        v = ft8_status.get(band)
+        if not v:
+            return "none", "--"
+        return v["state"], "%d sta %+d" % (v["stations"], v["best_snr"])
+
+    def wspr_cell(band):
+        b = wspr_by_band.get(band)
+        if not b or b.get("cnt", 0) <= 0:
+            return "none", "--"
+        snr = b.get("best_snr")
+        age = b.get("age_min")
+        return (b["state"],
+                "%d sp %s%s" % (b["cnt"],
+                                ("%+d" % snr) if isinstance(snr, int) else "",
+                                (" %.0fm" % age) if age is not None else ""))
+
+    rows = []
+    for band in all_bands:
+        lbl = wspr_by_band.get(band, {}).get("label") or _band_label(band)
+        f_state, f_txt = ft8_cell(band)
+        w_state, w_txt = wspr_cell(band)
+        rows.append((band,
+                     font_body.render(lbl, True, (225, 230, 238)),
+                     f_state, font_body.render(f_txt, True, (185, 195, 205)),
+                     w_state, font_body.render(w_txt, True, (185, 195, 205))))
+
+    hd_band = font_body.render("band", True, (130, 135, 145))
+    hd_ft8 = font_body.render("FT8", True, (150, 225, 165))
+    hd_wspr = font_body.render("WSPR", True, (150, 195, 235))
+    hint_s = font_body.render("click a cell for stations | middle-click removes",
+                              True, (120, 122, 128))
+
+    band_w = max([r[1].get_width() for r in rows] + [hd_band.get_width()])
+    ft8_w = max([r[3].get_width() for r in rows] + [hd_ft8.get_width()])
+    wspr_w = max([r[5].get_width() for r in rows] + [hd_wspr.get_width()])
+    cell_ft8_w = dot_r * 2 + inner + ft8_w
+    cell_wspr_w = dot_r * 2 + inner + wspr_w
+    row_h = max([r[1].get_height() for r in rows] + [font_body.get_height()])
+    table_w = band_w + inner * 2 + cell_ft8_w + inner * 2 + cell_wspr_w
+
+    metro_w = max([s.get_width() for s in metro_surfs], default=0)
+    metro_h = sum(s.get_height() + gap for s in metro_surfs)
+    w = max(title_s.get_width(), table_w, hint_s.get_width(), metro_w) + pad * 2
+    h = (title_s.get_height() + gap + metro_h
+         + row_h + gap + 1 + gap                       # column header + rule
+         + len(rows) * (row_h + gap)
+         + gap + hint_s.get_height() + pad * 2)
+
+    bx, by = _anchor_bubble(px, py, w, h, screen_w, top_margin)
+    bg = pygame.Surface((w, h), pygame.SRCALPHA)
+    bg.fill((10, 10, 14, 238))
+    surface.blit(bg, (bx, by))
+    border = target_summary_color(status.get("summary", "gray"))
+    pygame.draw.rect(surface, border, pygame.Rect(bx, by, w, h),
+                     3 if pinned else 2, border_radius=6)
+
+    x_band = bx + pad
+    x_ft8 = x_band + band_w + inner * 2
+    x_wspr = x_ft8 + cell_ft8_w + inner * 2
+
+    y = by + pad
+    surface.blit(title_s, (x_band, y))
+    y += title_s.get_height() + gap
+    for ms in metro_surfs:
+        surface.blit(ms, (x_band, y))
+        y += ms.get_height() + gap
+
+    surface.blit(hd_band, (x_band, y))
+    surface.blit(hd_ft8, (x_ft8 + dot_r * 2 + inner, y))
+    surface.blit(hd_wspr, (x_wspr + dot_r * 2 + inner, y))
+    y += row_h + gap
+    pygame.draw.line(surface, (58, 64, 76), (bx + pad, y), (bx + w - pad, y), 1)
+    y += gap
+
+    band_rows = []
+    for band, band_s, f_state, f_s, w_state, w_s in rows:
+        cy = y + row_h // 2
+        surface.blit(band_s, (x_band, y))
+        for xcol, cw, state, txt_s, src in (
+                (x_ft8, cell_ft8_w, f_state, f_s, "ft8"),
+                (x_wspr, cell_wspr_w, w_state, w_s, "wspr")):
+            cell = pygame.Rect(xcol - 4, y, cw + 8, row_h)
+            if band is not None and cell.collidepoint(mouse_pos or (-1, -1)):
+                pygame.draw.rect(surface, (34, 40, 50), cell.inflate(4, 2),
+                                 border_radius=4)
+            pygame.draw.circle(surface, target_summary_color(
+                "red" if state in ("weak", "none") else state),
+                (xcol + dot_r, cy), dot_r)
+            surface.blit(txt_s, (xcol + dot_r * 2 + inner, y))
+            if band is not None:
+                band_rows.append((band, src, cell))
+        y += row_h + gap
+    surface.blit(hint_s, (bx + pad, y + gap))
+    return {"rect": pygame.Rect(bx, by, w, h), "band_rows": band_rows, "back": None}
+
+
 def _marker_hit(targets, mx, my, radius=16):
     """targets: key -> (pos, kind, payload). Returns nearest key within radius."""
     best, best_d2 = None, radius * radius
@@ -290,7 +555,57 @@ _STATUS_COLORS = {
     "stale": (255, 140, 0),
     "failed": (230, 60, 60),
 }
-_STATUS_LABELS = [("tle", "TLE"), ("swx", "SWX"), ("qrz", "QRZ"), ("freq", "FRQ")]
+_STATUS_LABELS = [("tle", "TLE"), ("swx", "SWX"), ("qrz", "QRZ"), ("freq", "FRQ"),
+                  ("wspr", "WSP")]
+
+
+_BAND_ORDER = [
+    ("80m-40m", "80-40"),
+    ("30m-20m", "30-20"),
+    ("17m-15m", "17-15"),
+    ("12m-10m", "12-10"),
+]
+_COND_COLORS = {
+    "good": (60, 200, 90),
+    "fair": (235, 190, 40),
+    "poor": (220, 70, 60),
+}
+_COND_GRAY = (120, 120, 120)
+
+
+def draw_band_conditions(surface, font, bands, center_x, top_y, is_day):
+    """Compact HF band-condition strip from HamQSL's calculated conditions.
+
+    Shows the day- or night-relevant Good/Fair/Poor rating per band group,
+    color-coded, horizontally centered on center_x. `bands` is the nested
+    {band: {"day"/"night": rating}} dict from space_weather. Returns the drawn
+    bounding Rect."""
+    when = "day" if is_day else "night"
+    gap = 18
+    inner = 6
+    label_col = (170, 170, 176)
+
+    head = font.render(f"HF {when.title()}:", True, (150, 150, 156))
+    cells = []
+    total = head.get_width() + gap
+    for key, short in _BAND_ORDER:
+        rating = (bands.get(key, {}) or {}).get(when, "") or ""
+        col = _COND_COLORS.get(rating.lower(), _COND_GRAY)
+        lab = font.render(short, True, label_col)
+        val = font.render(rating or "--", True, col)
+        cells.append((lab, val))
+        total += lab.get_width() + inner + val.get_width() + gap
+    total -= gap  # drop the trailing gap
+
+    left = center_x - total // 2
+    x = left
+    surface.blit(head, (x, top_y))
+    x += head.get_width() + gap
+    for lab, val in cells:
+        surface.blit(lab, (x, top_y))
+        surface.blit(val, (x + lab.get_width() + inner, top_y))
+        x += lab.get_width() + inner + val.get_width() + gap
+    return pygame.Rect(left, top_y, total, head.get_height())
 
 
 def draw_status_row(surface, font, right_x, top_y):

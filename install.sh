@@ -14,6 +14,9 @@ sudo apt-get install -y python3 python3-pygame python3-requests x11-xserver-util
 sudo apt-get install -y python3-sgp4 2>/dev/null \
   || pip3 install --break-system-packages sgp4
 # Optional extras (safe to skip): timezonefinder (DST clock), Pillow (make_tiles.py)
+# paho-mqtt (FT8 monitor / PSKReporter live feed): distro first, pip fallback.
+sudo apt-get install -y python3-paho-mqtt 2>/dev/null \
+  || pip3 install --break-system-packages paho-mqtt
 sudo apt-get install -y python3-tz python3-pil 2>/dev/null || true
 
 echo "==> Seeding config.py from example (if missing)"

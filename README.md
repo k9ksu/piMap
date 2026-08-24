@@ -23,6 +23,23 @@ clock — all in a single full-screen [pygame](https://www.pygame.org/) app.
     logging activity speeds the refresh cadence (off by default).
 - **Satellite tracking** — TLE-based passes for amateur satellites and the ISS,
   with footprints, ground tracks, and per-sat radio (uplink/downlink) info.
+- **Propagation monitor** — drop target dots anywhere on the map and each one
+  rates the path from your QTH, per band, from two independent live sources:
+  - **FT8** via the [PSKReporter](https://pskreporter.info/) MQTT stream — answers
+    *is the path open **and** is anybody on it*, with real callsigns you could work.
+  - **WSPR** via [wspr.live](https://wspr.live/) — answers *is the path physically
+    open at all*, since beacons run 24/7 even when nobody is operating.
+  - Both columns are shown side by side and deliberately **not merged**: a band can
+    easily be green on one and blank on the other. Click either cell to drill into
+    which stations are actually being heard, grouped one row per callsign.
+  - **Locality is a real radius around your QTH**, not the Maidenhead field. A
+    2-character field is a 10°×20° box you are rarely centred in — a station in the
+    corner of one can be credited with openings that only exist 1000 km away.
+  - A chime fires when a dot turns green, **edge-triggered**, so a path that stays
+    open all afternoon announces itself once rather than on a repeating timer.
+- **Settings flyout** (hover the left edge) — TV output volume, alert-chime volume,
+  chime picker, and the spot mode (FT8 / CW / SSB) that sets how strict the dot
+  colours are. Choices persist across restarts.
 - **Grey line / terminator** overlay with day/night shading.
 - **Space weather** — SFI, K/A indices, sunspots (from hamqsl.com).
 - **Header clock** with a hover bubble showing **chrony** time-sync quality and
@@ -39,7 +56,9 @@ local time chain) and composites everything onto one full-screen surface:
         QRZ Logbook ──┐  QSOs → great-circle lines
      Celestrak TLEs ──┤  satellites → tracks + footprints
          hamqsl.com ──┼──▶   piMap (pygame)   ──▶  full-screen world map (HDMI)
-         SatNOGS DB ──┘            │
+         SatNOGS DB ──┤            │
+   PSKReporter MQTT ──┤            │  FT8 spots (live stream) ─┐ target-dot
+          wspr.live ──┘            │  WSPR spots (5-min poll) ─┘ propagation
                                    └─ header: callsign · clock · time-sync/GNSS bubble
    gpsd + chrony (local) ─────────────┘   (optional — see the gps-stratum1-pi project)
 ```
@@ -56,9 +75,16 @@ data and the relevant status tag goes amber/red until the fetch recovers.
 | **Left-drag on map** | Pan |
 | **Left-click a dot** | Pin / unpin that QSO or satellite's info bubble |
 | **Left-click empty map** | Dismiss the pinned bubble |
-| **Hover a dot** | Show its info bubble |
+| **Hover a dot** | Show its info bubble (stays open while the cursor is inside the bubble) |
+| **Double-click empty map** | Drop a propagation target dot |
+| **Left-drag a target dot** | Move it (its grid square is recomputed on release) |
+| **Middle-click a target dot** | Remove it |
+| **Click a band cell in a target bubble** | Drill into that source's spots — who is being heard |
+| **Right-drag on map** | Pan |
 | **Right-click** | Reset view (re-center / default zoom) |
-| **Esc** | Quit |
+| **Hover the left edge** | Settings flyout (volumes, chime, spot mode) |
+| **Hover the right edge** | Satellite selection panel |
+| **Esc** | Quit (note: a kiosk window without keyboard focus will not receive this) |
 
 ## Hardware (as used)
 
@@ -113,6 +139,13 @@ only placeholders.
 | `QRZ_N3FJP_TRIGGER_ENABLE` | Enable the optional N3FJP API accelerator |
 | `DISPLAY_OUTPUT` | Which HDMI connector to render on |
 | `CURSOR_HIDE_SECONDS` | Idle time before the mouse cursor hides |
+| `FLYOUT_IDLE_HIDE_SECONDS` | Close an edge flyout after this long with no mouse motion |
+| `WSPR_HOME_RADIUS_KM` | Radius around the QTH counted as "local" for WSPR (0 = old Maidenhead-field matching) |
+| `FT8_ENABLED` / `FT8_HOME_RADIUS_KM` | Enable the PSKReporter feed, and its own local radius |
+| `FT8_GREEN_MIN_STATIONS` | Distinct DX callsigns needed before a band counts as open |
+| `FT8_MODE_THRESHOLDS` / `WSPR_MODE_THRESHOLDS` | Per-mode SNR bars. **Separate scales** — FT8 stations run 25–100 W against WSPR's 1–5 W |
+| `WSPR_ALERT_COOLDOWN_SECONDS` | Anti-flap floor between chimes for one dot |
+| `ALERT_VOLUME` / `ALERT_SOUND` | Chime volume and which of the 5 synthesised chimes |
 
 ## Running as a service
 
@@ -149,7 +182,9 @@ sudoers drop-in — neither is required by piMap itself:
 | [QRZ Logbook API](https://logbook.qrz.com/) | Your QSOs | Requires `QRZ_API_KEY`; polite STATUS/AFTERLOGID polling |
 | [Celestrak](https://celestrak.org/) | Satellite TLEs | Cached to `data/amateur_tle_cache.txt`; 15-min retry on failure |
 | [SatNOGS DB](https://db.satnogs.org/) | Sat transmitter (uplink/downlink) info | Cached to `data/satnogs_tx_cache.json` |
-| [hamqsl.com](https://www.hamqsl.com/) | Space-weather indices | SFI, K/A, sunspots |
+| [hamqsl.com](https://www.hamqsl.com/) | Space-weather indices | SFI, K/A, sunspots + HF band-conditions strip |
+| [PSKReporter](https://pskreporter.info/) | Live FT8 spots | MQTT stream; the QTH radius is enumerated into 4-char grid squares and filtered **broker-side**, so only local traffic is received |
+| [wspr.live](https://wspr.live/) | WSPR spots | ClickHouse HTTP API at `db1.wspr.live`; 5-minute poll, each direction limited separately |
 | gpsd + chrony (local) | Clock + time-sync/GNSS bubble | Optional; only if the Pi is a GPS NTP server |
 
 ## Project layout
@@ -169,7 +204,13 @@ sat_tracker.py        # TLE propagation / pass prediction (sgp4)
 sat_panel.py          # satellite side-panel UI
 sat_panel_manager.py  # panel state / scroll / selection
 sat_radio.py          # per-satellite uplink/downlink info
-space_weather.py      # hamqsl SFI / K / A indices
+space_weather.py      # hamqsl SFI / K / A indices + band conditions
+wspr_monitor.py       # WSPR propagation per target dot (wspr.live)
+ft8_monitor.py        # FT8 propagation per target dot (PSKReporter MQTT)
+settings_panel.py     # left-edge settings flyout (volumes, chime, spot mode)
+alerts.py             # synthesised band-opening chimes (no sound files)
+audio_out.py          # PipeWire routing + volume for the TV output
+metros.py             # largest cities in a grid field, for dot bubbles
 greyline.py           # day/night terminator overlay
 geo.py                # map projection / coordinate math
 geo_boundaries.py     # coastline / country / state rendering

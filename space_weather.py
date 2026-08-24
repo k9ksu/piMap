@@ -28,6 +28,9 @@ _cache = {
     "A": "?",
     "Sunspots": "?",
     "Geomag": "Unknown",
+    # HamQSL <calculatedconditions>: {band_name: {"day": rating, "night": rating}}
+    # e.g. {"80m-40m": {"day": "Fair", "night": "Good"}, ...}
+    "Bands": {},
     "_fetched_at": 0.0,
 }
 _refresh_in_progress = False
@@ -43,12 +46,26 @@ def _parse(xml_text):
         el = sd.find(tag)
         return el.text.strip() if (el is not None and el.text) else ""
 
+    # Calculated HF band conditions: one <band name=".." time="day|night">Rating</band>
+    # per band group. Nest them by band -> time so the UI can show the set that
+    # matches whether the QTH is currently in daylight.
+    bands = {}
+    cc = sd.find("calculatedconditions")
+    if cc is not None:
+        for b in cc.findall("band"):
+            name = (b.get("name") or "").strip()
+            when = (b.get("time") or "").strip().lower()
+            rating = (b.text or "").strip()
+            if name and when:
+                bands.setdefault(name, {})[when] = rating
+
     return {
         "SFI": text_of("solarflux"),
         "Kp": text_of("kindex"),
         "A": text_of("aindex"),
         "Sunspots": text_of("sunspots"),
         "Geomag": text_of("geomagfield").title() or "Unknown",
+        "Bands": bands,
     }
 
 

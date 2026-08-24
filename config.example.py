@@ -19,6 +19,96 @@ NIGHT_ALPHA = 75        # darkness of the night side (0-255)
 # ==== Layout ====
 SPACE_BAR_HEIGHT = 140  # pixels reserved at top for info bar
 
+# Compact HF band-conditions strip (HamQSL) along the bottom of the header.
+# Shows the day- or night-relevant Good/Fair/Poor rating per band group.
+BAND_CONDITIONS_ENABLED = True
+
+# ==== WSPR target-dot propagation monitor ====
+# Left-click the map to drop a target dot; hover it + press Delete to remove.
+# Each dot turns green/yellow/red for recent WSPR propagation between your grid
+# FIELD and the target's field, per band (data from wspr.live). Mouseover shows
+# the per-band table; an audio chime fires when a band opens.
+WSPR_TARGETS_ENABLED = True
+WSPR_WINDOW_MINUTES = 30            # spot look-back window
+WSPR_POLL_SECONDS = 300            # query interval (be polite to wspr.live)
+WSPR_GREEN_MIN_SPOTS = 2           # >= this many recent spots -> green
+WSPR_GREEN_MAX_AGE_MIN = 16        # newest spot must be this fresh for green
+# When a target drops to nothing-heard, show it "red" for this many polls (a
+# recent close), then fade to the quiet white dot. 0 = never show red.
+WSPR_RECENT_CLOSE_POLLS = 5
+WSPR_BANDS = [1, 3, 7, 10, 14, 18, 21, 24, 28, 50]  # wspr.live band codes (MHz)
+# Spotting mode: dots estimate the likelihood of THIS mode from the best WSPR
+# SNR on the path. Pick in the Settings flyout (persists to ui_prefs.json).
+WSPR_MODE = "FT8"
+# (green, yellow) thresholds on best WSPR SNR (dB, 2.5 kHz ref) per mode. Tune to
+# taste: raise for a stricter (less green) dot, lower for more optimistic.
+WSPR_MODE_THRESHOLDS = {
+    "FT8": (-12, -20),   # decodes very weak
+    "CW": (-4, -13),     # needs a bit more
+    "SSB": (6, -3),      # needs a solid signal
+}
+TARGET_DOT_RADIUS = 7
+
+# Left SETTINGS flyout: close it after this many seconds with no mouse
+# motion, even if the cursor is parked on the hot edge or on the panel
+# itself. Without this a cursor left at x<=8 pins the flyout open (and
+# holds the render loop at 60 fps). 0 disables the idle timeout.
+FLYOUT_IDLE_HIDE_SECONDS = 10
+
+# Max individual spots pulled when you click a band row in a target's
+# bubble to see who is actually being heard on that path.
+WSPR_DETAIL_MAX_SPOTS = 60
+
+# The "home" end of a WSPR path: spots count only if that end is within this
+# many km of HOME_LAT/HOME_LON. Replaces matching on the 2-char Maidenhead
+# field, which is a 10x20 degree box you are rarely centered in -- EM reaches
+# ~1490 km east of this QTH but only ~240 km west, so field matching reported
+# openings that existed only for stations far to the east. 0 = old behavior.
+WSPR_HOME_RADIUS_KM = 800
+
+# ==== FT8 monitor (PSKReporter MQTT live feed) ====
+# WSPR tells you whether a path is physically open (beacons run 24/7); FT8
+# tells you whether it is open AND somebody is on it. Both columns are shown
+# side by side in a target dot's bubble.
+FT8_ENABLED = True
+FT8_MQTT_HOST = "mqtt.pskreporter.info"
+FT8_MQTT_PORT = 1883
+# "Local" end of an FT8 path. FT8 is so much denser than WSPR that this can be
+# far tighter than WSPR_HOME_RADIUS_KM and still have plenty of data --
+# 800 km gives ~35 spots/sec, 400 km still gives ~10/sec.
+FT8_HOME_RADIUS_KM = 800
+FT8_WINDOW_MINUTES = 15        # rolling window kept in memory
+FT8_GREEN_MAX_AGE_MIN = 6      # newest decode must be this fresh for green
+FT8_GREEN_MIN_STATIONS = 5     # >= this many distinct DX callsigns for green
+FT8_YELLOW_MIN_STATIONS = 2    # below this a path is 'weak', not yellow
+FT8_BUCKET_MAX_SPOTS = 400     # per (field, band) memory cap
+FT8_STATUS_TTL_SECONDS = 2.0   # cache the per-band snapshot this long
+# Thresholds on the best FT8 report (dB), per target mode. NOT the same scale
+# as WSPR_MODE_THRESHOLDS: FT8 stations run 25-100 W against WSPR's 1-5 W, so
+# an identical dB figure means a much weaker path here.
+FT8_MODE_THRESHOLDS = {
+    "FT8": (-10, -21),
+    "CW": (0, -10),
+    "SSB": (12, 3),
+}
+ALERT_SOUND_ENABLED = True         # chime when a dot turns green (silent if no audio)
+# Anti-flap floor only: a dot chimes once when it turns green and stays silent
+# while it remains green. This is the minimum gap before the SAME target may
+# chime again after it has dropped out of green and come back.
+WSPR_ALERT_COOLDOWN_SECONDS = 1800
+WSPR_ALERT_HIGHLIGHT_SECONDS = 60  # ping-ring an opened dot this long (0 = off)
+
+# ==== Audio output ====
+ALERT_VOLUME = 0.8            # chime volume 0..1 (also adjustable in Settings flyout)
+# Default chime; pick from the Settings flyout (persists to ui_prefs.json).
+# One of: Soft Chime, Marimba, Bell, Music Box, Ascending Triad.
+ALERT_SOUND = "Soft Chime"
+TV_AUDIO_CARD = "vc4-hdmi-1"  # ALSA card for HDMI-2 (piMap's TV) — the sink we control
+TV_VOLUME_MAX = 1.0          # cap for the TV volume slider (1.0 = 100%)
+# SDL device to route the chime to (piMap's TV). None = auto-pick the HDMI-2
+# device; set an exact name from the log if auto-pick guesses wrong.
+ALERT_AUDIO_DEVICE = None
+
 # ==== Zoom ====
 # The 5400px base map is sharp to ~2.8x; beyond that high-res tiles (below)
 # take over for crisp detail to ~11x. Vector overlays stay crisp at any zoom.

@@ -25,14 +25,16 @@ class SatPanelManager:
             width=380,
             top=getattr(config, "SPACE_BAR_HEIGHT", 90),
             bottom_margin=0,
+            idle_hide_s=getattr(config, "FLYOUT_IDLE_HIDE_SECONDS", 10),
         )
 
     # ------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------
 
-    def update(self, dt: float, mouse_pos: tuple[int, int]) -> None:
-        self.panel.update(dt)
+    def update(self, dt: float, mouse_pos: tuple[int, int],
+               idle_s: float = 0.0) -> None:
+        self.panel.update(dt, idle_s)
 
     def draw(self, screen: pygame.Surface, *_fonts) -> None:
         # SatPanel manages its own fonts internally

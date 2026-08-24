@@ -4,8 +4,12 @@ piMap.py - QSO great-circle map with QRZ logbook and space weather.
 
 Controls:
   - Mouse wheel: zoom around cursor (unless mouse is over Sat Panel)
-  - Left click + drag: pan
-  - Right click: reset view (zoom=1, centered on home QTH)
+  - Double-click empty map: drop a WSPR target dot (single click just deselects)
+  - Left click a dot: pin/unpin its info bubble (does not pan)
+  - Left-drag a dot: move it
+  - Middle click (or Delete/Backspace) over a target dot: remove it
+  - Right click + drag: pan (hand cursor)
+  - Right click (no drag): reset view (zoom=1, centered on home QTH)
   - ESC: exit
 
 This module owns app setup, the camera/view math, and the main event/render
@@ -24,13 +28,15 @@ loop. Functionality is split across focused modules:
   - sat_panel*.py     slide-out satellite selection panel
   - applog.py         rotating log + component status registry
 
-Controls: wheel = zoom, left-drag = pan, right-click = reset, ESC = exit.
+Controls: wheel = zoom, right-drag = pan, right-click = reset, ESC = exit.
 """
 
 import sys
 import os
 import time
 import math
+import json
+import uuid
 import colorsys
 from datetime import datetime, timezone, timedelta
 import pygame
@@ -45,7 +51,7 @@ from geo import (
     clamp,
     nice_number as _nice_number,
 )
-from maidenhead import maidenhead_to_latlon
+from maidenhead import maidenhead_to_latlon, latlon_to_field, latlon_to_maidenhead
 from greyline import (
     solar_decl_and_eqtime as _solar_decl_and_eqtime_minutes_approx,
     subsolar_lon as _subsolar_lon_deg_approx,
@@ -65,6 +71,7 @@ from space_weather import get_space_weather
 
 from sat_panel_manager import SatPanelManager
 from sat_panel import SatDef
+from settings_panel import SettingsPanel
 import sat_tracker
 import sat_radio
 import geo_boundaries
@@ -73,11 +80,18 @@ import applog
 import chrony_status
 import gps_status
 import n3fjp_status
+import wspr_monitor
+import ft8_monitor
+import alerts
+import audio_out
+import metros
 import overlays
 from overlays import (
     ISS_NORAD, QSO_DOT_RADIUS,
     draw_gc_line, draw_sat_track, draw_sat_marker, draw_sat_bubble,
-    _marker_hit, draw_status_row, _sat_color, _fmt_pass,
+    _marker_hit, draw_status_row, draw_band_conditions, draw_target_bubble,
+    draw_target_detail_bubble,
+    target_summary_color, _sat_color, _fmt_pass,
     iss_simulated_now, _apply_map_brightness,
 )
 
@@ -91,6 +105,8 @@ MAX_ZOOM = float(getattr(config, "MAX_ZOOM", 8.0))
 ZOOM_STEP = float(getattr(config, "ZOOM_STEP", 1.15))
 
 DRAG_THRESHOLD_PX = 6
+DOUBLE_CLICK_S = 0.40   # max gap between the two clicks of a double-click
+DOUBLE_CLICK_PX = 8     # and they must land within this many px of each other
 IDLE_SMOOTH_DELAY_S = 0.20
 LINES_HQ_IDLE_S = 0.18  # supersample lines only after the mouse has been still this long
 
@@ -109,6 +125,24 @@ TERMINATOR_LINE = False
 TERMINATOR_ALPHA = 140
 TERMINATOR_WIDTH = 2
 GREYLINE_REFRESH_S = 5  # recompute the greyline at most this often (it drifts slowly)
+
+
+_SUMMARY_RANK = {"quiet": 0, "red": 1, "yellow": 2, "green": 3}
+
+
+def _merge_summary(wspr_summary, ft8_bands):
+    """One dot colour from two independent sources: whichever is more open wins.
+
+    ft8_bands is {band: {..., "state": ...}} for this dot's grid field. FT8
+    "weak"/"none" mean heard-but-unusable / not-heard, which display as red the
+    same way the WSPR side already does."""
+    best = wspr_summary if wspr_summary in _SUMMARY_RANK else "quiet"
+    for v in (ft8_bands or {}).values():
+        st = v.get("state")
+        st = "red" if st in ("weak", "none") else st
+        if _SUMMARY_RANK.get(st, 0) > _SUMMARY_RANK.get(best, 0):
+            best = st
+    return best
 
 
 def _connector_bounds(name):
@@ -228,6 +262,69 @@ def main():
 
     sat_ui = SatPanelManager(screen_width, screen_height)
 
+    # Left-edge user-settings flyout. First widgets: TV (HDMI-2) output volume
+    # and the alert-chime volume + sound picker, plus Mute-TV / Test-chime.
+    settings_ui = SettingsPanel(screen_width, screen_height,
+                                top=getattr(config, "SPACE_BAR_HEIGHT", 90),
+                                idle_hide_s=getattr(config, "FLYOUT_IDLE_HIDE_SECONDS", 10))
+
+    # Small persisted UI prefs (the chosen chime survives restarts).
+    prefs_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui_prefs.json")
+    try:
+        with open(prefs_file) as f:
+            ui_prefs = json.load(f)
+    except (OSError, ValueError):
+        ui_prefs = {}
+
+    def _save_prefs():
+        try:
+            with open(prefs_file, "w") as f:
+                json.dump(ui_prefs, f, indent=2)
+        except OSError as e:
+            _log.warning("could not save prefs: %s", e)
+
+    def _tv_vol_get():
+        c = audio_out.get_cached()
+        return c[0] if c else 0.0
+
+    def _select_alert_sound(name):
+        alerts.set_sound(name)
+        alerts.play()               # preview the pick
+        ui_prefs["alert_sound"] = name
+        _save_prefs()
+
+    def _select_spot_mode(name):
+        wspr_monitor.set_mode(name)
+        ft8_monitor.set_mode(name)
+        ui_prefs["spot_mode"] = name
+        _save_prefs()
+
+    # Apply the persisted spotting mode before the monitor's first poll.
+    ft8_monitor.set_mode(ui_prefs.get("spot_mode",
+                          getattr(config, "WSPR_MODE", "FT8")))
+    wspr_monitor.set_mode(ui_prefs.get("spot_mode",
+                                       getattr(config, "WSPR_MODE", "FT8")))
+
+    settings_ui.set_sliders([
+        {"key": "tv", "label": "TV Volume (HDMI-2)", "get": _tv_vol_get,
+         "set": audio_out.set_volume},
+        {"key": "alert", "label": "Alert Chime", "get": alerts.get_volume,
+         "set": alerts.set_volume},
+    ])
+    settings_ui.set_choosers([
+        {"label": "Spot Mode (dot = mode likelihood)", "options": wspr_monitor.modes,
+         "get": wspr_monitor.get_mode, "on_select": _select_spot_mode},
+        {"label": "Alert Sound (click to hear)", "options": alerts.sound_names,
+         "get": alerts.current_sound, "on_select": _select_alert_sound},
+    ])
+    settings_ui.set_buttons([
+        {"key": "test", "label": "Test Chime", "on_click": alerts.play},
+        {"key": "mute",
+         "label": lambda: ("Unmute TV" if (audio_out.get_cached() or (0, False))[1]
+                           else "Mute TV"),
+         "on_click": audio_out.toggle_mute},
+    ])
+
     try:
         map_path = os.path.join(os.path.dirname(__file__), config.WORLD_MAP_FILE)
         world_img = pygame.image.load(map_path).convert()
@@ -251,6 +348,92 @@ def main():
 
     home_latlon = (config.HOME_LAT, config.HOME_LON)
     home_mx, home_my = lonlat_to_xy(home_latlon[1], home_latlon[0], map_width, map_height)
+
+    # ---- WSPR target dots: user-placed points whose propagation to the QTH is
+    # monitored via wspr.live. Persisted to targets.json next to this script. ----
+    wspr_enabled = getattr(config, "WSPR_TARGETS_ENABLED", True)
+    home_field = latlon_to_field(config.HOME_LAT, config.HOME_LON)
+    targets_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "targets.json")
+    targets = []
+
+    def _save_targets():
+        try:
+            with open(targets_file, "w") as f:
+                json.dump(targets, f, indent=2)
+        except Exception as e:
+            _log.warning("could not save targets: %s", e)
+
+    ft8_enabled = getattr(config, "FT8_ENABLED", True)
+
+    def _reconfig_wspr():
+        if wspr_enabled:
+            wspr_monitor.configure(home_field, targets)
+        if ft8_enabled:
+            ft8_monitor.configure(targets)
+
+    def _add_target(lat, lon):
+        t = {
+            "id": uuid.uuid4().hex[:8],
+            "lat": round(lat, 4), "lon": round(lon, 4),
+            "field": latlon_to_field(lat, lon),
+            "label": latlon_to_maidenhead(lat, lon, 4),
+        }
+        targets.append(t)
+        _save_targets()
+        _reconfig_wspr()
+        _log.info("Target added: %s (field %s)", t["label"], t["field"])
+
+    def _remove_target(tid):
+        nonlocal targets
+        targets = [t for t in targets if t["id"] != tid]
+        alerted_until.pop(tid, None)   # else the deleted dot's ping entry lingers
+        _save_targets()
+        _reconfig_wspr()
+
+    def _finalize_target_move(tid):
+        # After a drag, recompute the dot's grid field/label and re-query WSPR
+        # (its field, and thus its monitored path, may have changed).
+        for t in targets:
+            if t["id"] == tid:
+                t["field"] = latlon_to_field(t["lat"], t["lon"])
+                t["label"] = latlon_to_maidenhead(t["lat"], t["lon"], 4)
+                _log.info("Target moved: %s (field %s)", t["label"], t["field"])
+                break
+        _save_targets()
+        _reconfig_wspr()
+
+    if wspr_enabled:
+        try:
+            with open(targets_file) as f:
+                targets = json.load(f)
+        except FileNotFoundError:
+            targets = []
+        except Exception as e:
+            _log.warning("could not load targets: %s", e)
+            targets = []
+        for t in targets:  # backfill derived fields for older/hand-edited files
+            t.setdefault("id", uuid.uuid4().hex[:8])
+            t.setdefault("field", latlon_to_field(t["lat"], t["lon"]))
+            t.setdefault("label", latlon_to_maidenhead(t["lat"], t["lon"], 4))
+        _reconfig_wspr()
+        alerts.init(getattr(config, "ALERT_SOUND_ENABLED", True),
+                    devicename=getattr(config, "ALERT_AUDIO_DEVICE", None),
+                    volume=float(getattr(config, "ALERT_VOLUME", 0.8)),
+                    sound=ui_prefs.get("alert_sound",
+                                       getattr(config, "ALERT_SOUND", "Soft Chime")))
+        metros.start()  # background load of the city dataset for dot bubbles
+        _log.info("WSPR monitor: %d target(s), home end = %s of %.2f,%.2f (field %s)",
+                  len(targets), wspr_monitor.home_scope_label(),
+                  getattr(config, "HOME_LAT", 0.0), getattr(config, "HOME_LON", 0.0),
+                  home_field)
+        if ft8_enabled:
+            _log.info("FT8 monitor enabled (PSKReporter MQTT, home end = %s)",
+                      ft8_monitor.home_scope_label())
+
+    audio_out.start()   # TV (HDMI-2) volume control for the Settings flyout
+    audio_out.refresh()
+    # The default sink is HDMI-1; move piMap's chime stream to HDMI-2 (the TV).
+    audio_out.route_pid_to_tv(os.getpid())
 
     # qrz_all  = full last-N list from QRZ (with timestamps) — the fallback set.
     # qrz_qsos = what's drawn: current logging session if active, else qrz_all.
@@ -286,10 +469,28 @@ def main():
     cam_cx = home_mx
     cam_cy = home_my
 
-    left_down = False
+    # Pan gesture state. Either the left button (button 1) or the right button
+    # (button 3) can drag the map. pan_button records which one started the
+    # gesture so a release knows whether it should also reset the view — a
+    # right-click that never became a drag still means "reset", as before.
+    pan_active = False
     dragging = False
+    pan_button = 0
     down_pos = (0, 0)
     down_cam = (cam_cx, cam_cy)
+
+    # Target-dot drag: which dot (id) the left button grabbed, and whether the
+    # pointer has moved past the threshold yet (a grab with no move = pin click).
+    drag_target = None
+    dot_moved = False
+
+    # target_id -> time.time() until which a "just opened" ping ring is drawn.
+    alerted_until = {}
+    alert_highlight_s = float(getattr(config, "WSPR_ALERT_HIGHLIGHT_SECONDS", 60))
+
+    # Double-click tracking for placing dots (single click just deselects).
+    last_lclick_t = 0.0
+    last_lclick_pos = (0, 0)
 
     last_interaction = 0.0
     last_motion = time.time()  # so the idle-hide timer starts fresh
@@ -309,6 +510,13 @@ def main():
     sat_catalog = []
     hover_targets = {}      # key -> ((sx, sy), kind, payload), refreshed each render
     pinned_key = None
+    # Geometry of the target bubble drawn on the PREVIOUS frame, so the cursor
+    # can move off the dot and into the bubble without it vanishing. One frame
+    # of lag is invisible and avoids laying the bubble out twice per frame.
+    bubble_layout = None    # {"rect":..., "band_rows":[(band, src, Rect)], ...} or None
+    bubble_key = None       # hover_targets key that bubble_layout belongs to
+    # Which (source, target, band) cell the drill-down is showing, if any.
+    detail_req = None       # {"source": "ft8"|"wspr", "target_id":, "field":, "band":}
     ss_overlay = None
     SS_SCALE = 2
 
@@ -354,6 +562,18 @@ def main():
         cam_cy = home_my
         clamp_camera()
         last_interaction = time.time()
+
+    def set_map_cursor(hand):
+        # Show the hand cursor while dragging the map, arrow otherwise. The
+        # idle-hide logic (set_visible) is independent of shape, so this stays
+        # in effect across a hide/show cycle. Wrapped defensively — a cursor
+        # failure must never take the map down.
+        try:
+            pygame.mouse.set_cursor(
+                pygame.SYSTEM_CURSOR_HAND if hand else pygame.SYSTEM_CURSOR_ARROW
+            )
+        except Exception:
+            pass
 
     def apply_zoom_at_cursor(new_zoom, mouse_x, mouse_y):
         nonlocal zoom, cam_cx, cam_cy, last_interaction
@@ -485,12 +705,17 @@ def main():
         # slowly animating (clock, sats, greyline) so we don't peg a core.
         now_t = time.time()
         panel_animating = abs(sat_ui.panel.x - sat_ui.panel.target_x) > 1
-        interacting = (dragging or left_down or panel_animating
+        ping_active = any(now_t < exp for exp in alerted_until.values())
+        interacting = (dragging or pan_active or panel_animating or ping_active
+                       or settings_ui.visible()
                        or (now_t - last_motion) < 0.4
                        or (now_t - last_interaction) < 0.4)
         dt = clock.tick(60 if interacting else idle_fps) / 1000.0
         mouse_pos = pygame.mouse.get_pos()
-        sat_ui.update(dt, mouse_pos)
+        sat_ui.update(dt, mouse_pos, now_t - last_motion)
+        # Pass the idle clock so the flyout also closes when the mouse simply
+        # stops moving, not only when the cursor leaves it.
+        settings_ui.update(dt, now_t - last_motion)
 
         # Hide the cursor after a period of no mouse motion; show it on movement.
         # Toggle only on change so we aren't calling SDL every frame.
@@ -580,6 +805,24 @@ def main():
             elif event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
                 running = False
 
+            elif (event.type == pygame.KEYDOWN
+                  and event.key in (pygame.K_DELETE, pygame.K_BACKSPACE)):
+                # Delete/Backspace removes the target dot under the cursor — a
+                # bonus for setups where the window has keyboard focus (the kiosk
+                # here does not, so middle-click is the reliable remove).
+                if wspr_enabled:
+                    mxp, myp = pygame.mouse.get_pos()
+                    hk = _marker_hit(hover_targets, mxp, myp)
+                    if hk is not None and hk[0] == "target":
+                        _remove_target(hk[1])
+                        if pinned_key == hk:
+                            pinned_key = None
+
+            # Settings flyout (left edge) gets first crack; if it consumes the
+            # event, don't let it fall through to map pan/zoom/dot handling.
+            if settings_ui.handle_event(event):
+                continue
+
             # Let panel consume clicks first
             if sat_ui.handle_event(event):
                 # If it was a wheel, handle separately below
@@ -612,23 +855,117 @@ def main():
                         sat_ui.on_wheel(-1)
                     continue
 
-                if event.button == 1 and not sat_ui.wheel_is_for_panel((mx, my)):
-                    hit = _marker_hit(hover_targets, mx, my)
-                    if hit is not None:
-                        # Click a sat/QSO dot: toggle its pinned info bubble.
-                        pinned_key = None if pinned_key == hit else hit
-                        continue
-                    # Click empty map: dismiss any pin, then begin pan.
-                    pinned_key = None
+                if event.button == 2:
+                    # Middle button removes the WSPR target dot under the cursor.
+                    if wspr_enabled:
+                        hk = _marker_hit(hover_targets, mx, my)
+                        if hk is not None and hk[0] == "target":
+                            _remove_target(hk[1])
+                            if pinned_key == hk:
+                                pinned_key = None
+                    continue
+
+                if event.button == 3:
+                    # Right button on the map: begin a hand-cursor pan. If the
+                    # pointer never moves past the drag threshold, MOUSEBUTTONUP
+                    # treats it as the reset-view click it has always been.
+                    # A right-click off the map resets immediately, as before.
                     if inside_map_rect(mx, my):
-                        left_down = True
+                        pan_active = True
                         dragging = False
+                        pan_button = 3
                         down_pos = (mx, my)
                         down_cam = (cam_cx, cam_cy)
+                        set_map_cursor(True)
+                    else:
+                        reset_view()
+                    continue
+
+                if event.button == 1 and not sat_ui.wheel_is_for_panel((mx, my)):
+                    # A click inside an open target bubble belongs to the bubble,
+                    # never to the map underneath it: a band row drills into that
+                    # band, the back row returns, and anything else is swallowed
+                    # so it can't drop a dot or dismiss the bubble you're using.
+                    if (bubble_layout is not None
+                            and bubble_layout["rect"].collidepoint(mx, my)):
+                        entry = hover_targets.get(bubble_key)
+                        tgt = entry[2][0] if (entry and entry[1] == "target") else None
+                        back = bubble_layout.get("back")
+                        if back is not None and back.collidepoint(mx, my):
+                            detail_req = None
+                            wspr_monitor.clear_detail()
+                        elif tgt is not None:
+                            for band_code, src, brect in bubble_layout.get("band_rows", []):
+                                if not brect.collidepoint(mx, my):
+                                    continue
+                                detail_req = {"source": src, "target_id": tgt["id"],
+                                              "field": tgt.get("field", ""),
+                                              "band": band_code}
+                                if src == "wspr":
+                                    # WSPR detail is a network fetch; FT8 spots
+                                    # are already in memory, nothing to request.
+                                    wspr_monitor.request_detail(
+                                        tgt["id"], tgt.get("field", ""), band_code,
+                                        tgt.get("label", ""))
+                                # Pin it, or the bubble would close the moment
+                                # the cursor drifted off while reading.
+                                pinned_key = bubble_key
+                                break
+                        continue
+                    hit = _marker_hit(hover_targets, mx, my)
+                    if hit is not None and hit[0] == "target":
+                        # Grab a target dot: drag to move it, or release without
+                        # moving to pin/unpin its bubble (decided on button-up).
+                        drag_target = hit[1]
+                        dot_moved = False
+                        down_pos = (mx, my)
+                    elif hit is not None:
+                        # Click a sat/QSO dot: toggle its pinned info bubble.
+                        pinned_key = None if pinned_key == hit else hit
+                    elif inside_map_rect(mx, my):
+                        # Empty map: a DOUBLE-click drops a dot (deliberate);
+                        # a single click just dismisses any pinned bubble, so an
+                        # idle click doesn't litter the map with targets.
+                        tnow = time.time()
+                        is_double = (
+                            tnow - last_lclick_t <= DOUBLE_CLICK_S
+                            and abs(mx - last_lclick_pos[0]) <= DOUBLE_CLICK_PX
+                            and abs(my - last_lclick_pos[1]) <= DOUBLE_CLICK_PX)
+                        if wspr_enabled and is_double:
+                            mmx, mmy = screen_to_map(mx, my, zoom, cam_cx, cam_cy)
+                            lon, lat = xy_to_lonlat(mmx, mmy, map_width, map_height)
+                            _add_target(lat, lon)
+                            last_lclick_t = 0.0  # consume, so a 3rd click won't re-add
+                        else:
+                            pinned_key = None
+                            last_lclick_t = tnow
+                            last_lclick_pos = (mx, my)
+                    else:
+                        # Nothing to add: just dismiss any pinned bubble.
+                        pinned_key = None
 
             elif event.type == pygame.MOUSEMOTION:
                 last_motion = time.time()
-                if not left_down:
+
+                if drag_target is not None:
+                    # Moving a grabbed target dot: once past the threshold, the
+                    # dot follows the cursor live (field is recomputed on release).
+                    mx, my = event.pos
+                    if (not dot_moved) and (abs(mx - down_pos[0]) >= DRAG_THRESHOLD_PX
+                                            or abs(my - down_pos[1]) >= DRAG_THRESHOLD_PX):
+                        dot_moved = True
+                        set_map_cursor(True)
+                    if dot_moved:
+                        mmx, mmy = screen_to_map(mx, my, zoom, cam_cx, cam_cy)
+                        lon, lat = xy_to_lonlat(mmx, mmy, map_width, map_height)
+                        for t in targets:
+                            if t["id"] == drag_target:
+                                t["lat"], t["lon"] = round(lat, 4), round(lon, 4)
+                                break
+                        last_interaction = time.time()
+                    continue
+
+                if not pan_active:
                     continue
 
                 mx, my = event.pos
@@ -637,6 +974,7 @@ def main():
 
                 if (not dragging) and (abs(dx) >= DRAG_THRESHOLD_PX or abs(dy) >= DRAG_THRESHOLD_PX):
                     dragging = True
+                    set_map_cursor(True)  # hand while actually dragging (right button)
 
                 if dragging:
                     effective_scale = base_scale * zoom
@@ -646,12 +984,27 @@ def main():
                     last_interaction = time.time()
 
             elif event.type == pygame.MOUSEBUTTONUP:
-                if event.button == 1 and left_down:
-                    left_down = False
-                    dragging = False
+                if event.button == 1 and drag_target is not None:
+                    if dot_moved:
+                        _finalize_target_move(drag_target)
+                    else:
+                        # Grab-and-release without moving = pin/unpin the bubble.
+                        key = ("target", drag_target)
+                        pinned_key = None if pinned_key == key else key
+                        alerted_until.pop(drag_target, None)  # acknowledge the ping
+                    set_map_cursor(False)
+                    drag_target = None
+                    dot_moved = False
 
-                elif event.button == 3:
-                    reset_view()
+                elif pan_active and event.button == pan_button:
+                    was_dragging = dragging
+                    pan_active = False
+                    dragging = False
+                    set_map_cursor(False)
+                    # A right-click that never turned into a drag = reset view.
+                    if pan_button == 3 and not was_dragging:
+                        reset_view()
+                    pan_button = 0
 
         # ----------------------------- DRAW -----------------------------
 
@@ -662,10 +1015,10 @@ def main():
         # is actually slid out (so it animates/responds) — not merely when the
         # cursor is in the region where it would eventually appear.
         moving = (time.time() - last_motion) <= LINES_HQ_IDLE_S
-        panel_visible = sat_ui.panel.x < sat_ui.panel.hidden_x - 1
+        panel_visible = (sat_ui.panel.x < sat_ui.panel.hidden_x - 1) or settings_ui.visible()
         fresh_cache = frame_cache is not None and (now_t - frame_cache_t) < 0.5
-        if (moving and not dragging and not force_render and not panel_visible
-                and fresh_cache):
+        if (moving and not dragging and drag_target is None and not force_render
+                and not panel_visible and fresh_cache):
             screen.blit(frame_cache, (0, 0))
             pygame.display.flip()
             continue
@@ -707,6 +1060,19 @@ def main():
         geom_label = font_small.render(f"Geomag: {sw['Geomag']}", True, (255, 176, 0))
         geom_rect = geom_label.get_rect(topright=(screen_width - 20, sw_rect.bottom + 5))
         screen.blit(geom_label, geom_rect)
+
+        # Compact HF band-conditions strip along the bottom of the header,
+        # showing the day- or night-relevant ratings for the QTH's current
+        # daylight state. Reuses the same greyline solar math as the overlay.
+        if getattr(config, "BAND_CONDITIONS_ENABLED", True):
+            _utc = time.gmtime()
+            _decl, _eqt = _solar_decl_and_eqtime_minutes_approx(_utc)
+            _sslon = _subsolar_lon_deg_approx(_utc, _eqt)
+            _is_day = _cos_zenith(
+                math.radians(config.HOME_LAT), config.HOME_LON, _decl, _sslon) > 0
+            draw_band_conditions(
+                screen, font_small, sw.get("Bands", {}),
+                screen_width // 2, bar_h - font_small.get_height() - 8, _is_day)
 
         zoom_surf = font_small.render(f"Zoom {zoom:.1f}x", True, (190, 190, 190))
         zoom_rect = zoom_surf.get_rect(topright=(screen_width - 20, geom_rect.bottom + 6))
@@ -862,27 +1228,130 @@ def main():
         sx, sy = map_to_screen(mx, my)
         pygame.draw.circle(screen, qth_color, (sx, sy), home_r)
 
+        # --- WSPR target dots, colored by propagation status to the QTH ---
+        # Defined unconditionally: the bubble block below reads it even when
+        # there are no targets or WSPR is disabled.
+        ft8_status = {}
+        if wspr_enabled and targets:
+            wspr_status = wspr_monitor.get_status()
+            # FT8 is keyed by grid field (several dots can share one), WSPR by dot id.
+            ft8_status = (ft8_monitor.get_status([t.get("field", "") for t in targets])
+                          if ft8_enabled else {})
+            tdot_r = getattr(config, "TARGET_DOT_RADIUS", 7)
+            for t in targets:
+                tx, ty = map_to_screen(*lonlat_to_xy(t["lon"], t["lat"], map_width, map_height))
+                cx, cy = int(tx), int(ty)
+                if not screen_map_rect.collidepoint(cx, cy):
+                    continue
+                st = wspr_status.get(t["id"], {})
+                t_ft8 = ft8_status.get((t.get("field") or "").upper()[:2], {})
+                # The bubble keeps the two sources apart, but the dot is a single
+                # colour: take the more open verdict, so a band open on either
+                # source shows open.
+                summary = _merge_summary(st.get("summary", "quiet"), t_ft8)
+                if summary in ("green", "yellow", "red"):
+                    color = target_summary_color(summary)
+                    pygame.gfxdraw.filled_circle(screen, cx, cy, tdot_r, color)
+                    pygame.gfxdraw.aacircle(screen, cx, cy, tdot_r, (0, 0, 0))
+                    pygame.gfxdraw.aacircle(screen, cx, cy, tdot_r, color)
+                else:
+                    # Nothing heard (and not a recent close): faint white, black ring.
+                    pygame.gfxdraw.filled_circle(screen, cx, cy, tdot_r, (255, 255, 255, 60))
+                    pygame.draw.circle(screen, (0, 0, 0), (cx, cy), tdot_r, 2)
+                # Recently-opened ping: an expanding, fading ring to draw the eye.
+                exp = alerted_until.get(t["id"])
+                if exp and now_t < exp:
+                    pulse = 0.5 + 0.5 * math.sin(now_t * 5.0)   # smooth 0..1
+                    ring_r = tdot_r + 4 + int(round(9 * pulse))
+                    a = int(210 * (1.0 - pulse)) + 30
+                    ping = target_summary_color(summary) if summary == "green" else (255, 255, 255)
+                    pygame.gfxdraw.aacircle(screen, cx, cy, ring_r, (*ping, a))
+                    pygame.gfxdraw.aacircle(screen, cx, cy, ring_r - 1, (*ping, a))
+                # Grid + per-band detail live in the hover bubble, not on the map.
+                hover_targets[("target", t["id"])] = ((cx, cy), "target", (t, st))
+
+        # A band opening (red -> green) chimes once, is logged, and flags its
+        # dot with a ping ring so you can see WHICH target just opened.
+        if wspr_enabled:
+            openings = wspr_monitor.pop_openings()
+            for op in openings:
+                _log.info("WSPR opening: %s on %s", op["label"], op["band_label"])
+                alerted_until[op["target_id"]] = time.time() + alert_highlight_s
+            if openings:
+                alerts.play()
+
+        # Hovering an alerted dot acknowledges it: stop the ping immediately.
+        if alerted_until and not cursor_hidden:
+            hov = _marker_hit(hover_targets, mouse_pos[0], mouse_pos[1])
+            if hov is not None and hov[0] == "target":
+                alerted_until.pop(hov[1], None)
+
         # --- Info bubble: pinned target, else hovered dot ---
         # When the cursor is hidden (idle), clear all hover bubbles — otherwise
         # a bubble parked under the now-invisible cursor would stay stuck open.
         enabled_norads = {s.norad_id for s in enabled_sats}
         if pinned_key and pinned_key[0] == "sat" and pinned_key[1] not in enabled_norads:
             pinned_key = None  # an unchecked sat drops its pin
-        target_key = None if cursor_hidden else (
-            pinned_key if pinned_key in hover_targets
-            else _marker_hit(hover_targets, mouse_pos[0], mouse_pos[1]))
+        # No bubble while a dot is being dragged — keeps the drag light and
+        # avoids the bubble chasing the cursor.
+        hovered_key = _marker_hit(hover_targets, mouse_pos[0], mouse_pos[1])
+        # Cursor left the dot but is inside the bubble that dot opened: keep it.
+        # Only for target bubbles -- sat/QSO bubbles stay dot-hover-only.
+        if (hovered_key is None and bubble_layout is not None
+                and bubble_key in hover_targets
+                and bubble_layout["rect"].collidepoint(mouse_pos)):
+            hovered_key = bubble_key
+        target_key = None if (cursor_hidden or drag_target is not None) else (
+            pinned_key if pinned_key in hover_targets else hovered_key)
+        # Drill-down belongs to exactly one dot; moving to another (or to no
+        # bubble at all) drops it so the next hover starts on the band summary.
+        if detail_req is not None and target_key != ("target", detail_req["target_id"]):
+            detail_req = None
+            wspr_monitor.clear_detail()
+        detail = None
+        if detail_req is not None:
+            if detail_req["source"] == "ft8":
+                # Local: the spots are already in the rolling buckets.
+                detail = ft8_monitor.get_detail(detail_req["field"], detail_req["band"])
+                detail.update(source="FT8", state="ok", error="", truncated=False,
+                              band_label=wspr_monitor.band_label(detail_req["band"]))
+            else:
+                detail = wspr_monitor.get_detail()
+                if detail is not None:
+                    detail["source"] = "WSPR"
+
+        new_layout, new_layout_key = None, None
         if target_key is not None and target_key in hover_targets:
             bpos, kind, payload = hover_targets[target_key]
-            if kind == "sat":
-                bname, bcolor = payload.label, payload.color
-                blines, bnote = sat_radio.info(payload.norad_id)
+            if kind == "target":
+                tgt, st = payload
+                if detail is not None:
+                    new_layout = draw_target_detail_bubble(
+                        screen, bpos, tgt, detail, font_small, font_small,
+                        screen_width, getattr(config, "SPACE_BAR_HEIGHT", 90),
+                        pinned=(target_key == pinned_key), mouse_pos=mouse_pos)
+                else:
+                    new_layout = draw_target_bubble(
+                        screen, bpos, tgt, st,
+                        ft8_status.get((tgt.get("field") or "").upper()[:2], {}),
+                        font_small, font_small,
+                        screen_width, getattr(config, "SPACE_BAR_HEIGHT", 90),
+                        pinned=(target_key == pinned_key),
+                        metros=metros.top_metros_in_field(tgt.get("field", "")),
+                        mouse_pos=mouse_pos)
+                new_layout_key = target_key
             else:
-                bname, bcolor = payload["title"], qso_color
-                blines, bnote = payload["lines"], ""
-            draw_sat_bubble(screen, bpos, bname, blines, bnote, bcolor,
-                            font_small, font_small, screen_width,
-                            getattr(config, "SPACE_BAR_HEIGHT", 90),
-                            pinned=(target_key == pinned_key))
+                if kind == "sat":
+                    bname, bcolor = payload.label, payload.color
+                    blines, bnote = sat_radio.info(payload.norad_id)
+                else:
+                    bname, bcolor = payload["title"], qso_color
+                    blines, bnote = payload["lines"], ""
+                draw_sat_bubble(screen, bpos, bname, blines, bnote, bcolor,
+                                font_small, font_small, screen_width,
+                                getattr(config, "SPACE_BAR_HEIGHT", 90),
+                                pinned=(target_key == pinned_key))
+        bubble_layout, bubble_key = new_layout, new_layout_key
 
         # Header clock hover -> chrony (time sync) status bubble.
         if not cursor_hidden and clock_rect.collidepoint(mouse_pos):
@@ -891,6 +1360,7 @@ def main():
                                         gps=gps_status.get())
 
         sat_ui.draw(screen, font_big, font_small)
+        settings_ui.draw(screen)
 
         # Only refresh the motion cache while interacting; idle frames skip the
         # full-screen copy. The freshness gate above forces a real render on the

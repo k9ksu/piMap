@@ -13,6 +13,12 @@ logs/
 *.log
 *.log.*
 
+# --- User-placed WSPR target dots ---
+targets.json
+
+# --- User UI preferences (chosen alert chime, etc.) ---
+ui_prefs.json
+
 # --- Caches that shouldn't be in source control ---
 data/*_cache.json
 data/*_cache.txt

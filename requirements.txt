@@ -2,6 +2,7 @@
 pygame
 requests
 sgp4
+paho-mqtt        # FT8 monitor: PSKReporter MQTT live feed (FT8_ENABLED)
 
 # Optional:
 # timezonefinder   # DST-accurate local time in the header clock (graceful fallback if absent)

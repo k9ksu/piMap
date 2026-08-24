@@ -37,6 +37,7 @@ class SatPanel:
         width: int = 360,
         top: int = 70,
         bottom_margin: int = 40,
+        idle_hide_s: float = 10.0,
     ) -> None:
         self.screen_w = int(screen_w)
         self.screen_h = int(screen_h)
@@ -53,7 +54,10 @@ class SatPanel:
 
         # Hover/open behavior
         self.edge_hot_zone = 8
-        self.auto_hide_delay_s = 0.8
+        self.auto_hide_delay_s = 0.8      # grace period after the cursor leaves
+        # Also close after this long with no mouse motion, even while the cursor
+        # is parked inside the panel or on the hot edge. 0 disables it.
+        self.idle_hide_s = float(idle_hide_s)
         self._time_since_hover = 0.0
 
         # Scroll behavior
@@ -161,14 +165,24 @@ class SatPanel:
             if event.button == 1:
                 self._dragging_scroll = False
 
-    def update(self, dt: float) -> None:
+    def update(self, dt: float, idle_s: float = 0.0) -> None:
+        """idle_s: seconds since the last real mouse motion, from piMap. Opening
+        stays event-driven (a MOUSEMOTION in the hot zone), so this only ever
+        decides when to close."""
         mx, my = pygame.mouse.get_pos()
-        if (mx < self.screen_w - self.edge_hot_zone) and (not self._point_in_panel(mx, my)):
+        hovering = (mx >= self.screen_w - self.edge_hot_zone) or self._point_in_panel(mx, my)
+        if self._dragging_scroll:
+            stay_open = True          # never yank the panel mid scroll-drag
+        elif self.idle_hide_s > 0 and idle_s >= self.idle_hide_s:
+            stay_open = False         # mouse has gone still -- close even if hovered
+        else:
+            stay_open = hovering
+        if stay_open:
+            self._time_since_hover = 0.0
+        else:
             self._time_since_hover += dt
             if self._time_since_hover >= self.auto_hide_delay_s:
                 self.target_x = float(self.hidden_x)
-        else:
-            self._time_since_hover = 0.0
 
         speed = 18.0
         self.x += (self.target_x - self.x) * min(1.0, speed * dt)
