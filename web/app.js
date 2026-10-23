@@ -16,7 +16,7 @@ import { Tiles } from "./tiles.js";
 import { Night, subsolar, sunElevation } from "./sky.js";
 import { Sats } from "./sats.js";
 import { Borders } from "./borders.js";
-import { setupPanels, loadSettings, DEFAULT_SETTINGS } from "./panels.js";
+import { setupPanels, loadSettings, DEFAULT_SETTINGS, fmtPass } from "./panels.js";
 
 const TV = document.documentElement.classList.contains("tv");
 // ?debug=1&off=night,borders,sats,tiles,bright: switch layers off to find what's costly
@@ -30,7 +30,9 @@ let conf = null, view = null, tiles = null, night = null, sats = null, borders =
 let state = null, home = null, dpr = 1, u = 1;
 let baseDirty = true, overAt = 0, tleVersion = -1, tvSeen = null;
 let speed = 0, speedAt = 0, changedAt = 0;
-let settings = { ...DEFAULT_SETTINGS }, satsVersion = -1, clockSkew = 0;          // fastest satellite, device px/s (checked once a second)
+let settings = { ...DEFAULT_SETTINGS }, satsVersion = -1, clockSkew = 0;
+let pointer = null, pinned = null;   // pointer over the map (CSS px); the pinned bubble's NORAD
+const radio = new Map();             // NORAD -> {lines, note, next_pass, at}          // fastest satellite, device px/s (checked once a second)
 
 // ---- start --------------------------------------------------------------------------
 async function getJSON(url, opts) {
@@ -73,6 +75,7 @@ async function start() {
                   serverNow: () => (Date.now() + clockSkew) / 1000 });
   }
   if (!TV && conf.kiosk) wireTvPanel();
+  if (QS.get("debug")) window.__pimap = { view, sats, tiles };       // for measuring and tests
   await poll();
   setInterval(poll, 5000);
   setInterval(clock, 250);
@@ -127,7 +130,7 @@ function header() {
   const tags = $("tags"); tags.textContent = "";
   for (const [k, v] of Object.entries(state.status)) {
     const s = document.createElement("span");
-    s.className = v.state; s.title = v.detail || v.state; s.textContent = k.toUpperCase();
+    s.className = v.state; s.title = v.detail || v.state; s.textContent = v.label || k.toUpperCase();
     tags.appendChild(s);
   }
   if (conf.header.band_conditions && home) {
@@ -226,6 +229,7 @@ function drawOver(t) {
   octx.beginPath(); octx.rect(L, T, view.x(180) * dpr - L, view.y(-90) * dpr - T); octx.clip();
   if (!OFF.has("sats")) sats.draw(octx, view, dpr, u);
   octx.restore();
+  if (!TV) bubble();
   scaleBar();
 }
 
@@ -252,6 +256,51 @@ function scaleBar() {
   octx.stroke();
 }
 
+// ---- the info bubble (browsers only): piMap's, for the satellite under the mouse -------------
+async function radioInfo(norad) {
+  const r = radio.get(norad);
+  if (r && (r.loading || Date.now() - r.at < 600000)) return;
+  radio.set(norad, { ...(r || { lines: [], note: "loading radio data..." }), loading: true, at: Date.now() });
+  try {
+    const d = await getJSON(`api/sat/${norad}`);
+    radio.set(norad, { lines: d.lines, note: d.note, next_pass: d.next_pass, at: Date.now() });
+  } catch (e) {
+    radio.set(norad, { lines: [], note: "radio data unavailable", at: Date.now() - 540000 });
+  }
+  overAt = 0;
+}
+
+function bubble() {
+  const el = $("bubble");
+  let m = null;
+  if (pinned !== null) m = sats.markers.find((k) => k.norad === pinned) || null;
+  if (!m && pointer) m = sats.hit(pointer.x * dpr, pointer.y * dpr);
+  if (!m) { if (pinned !== null && !sats.show.has(pinned)) pinned = null; el.hidden = true; return; }
+  radioInfo(m.norad);
+  const info = radio.get(m.norad) || { lines: [], note: "loading radio data..." };
+  const body = info.lines && info.lines.length ? info.lines : [info.note];
+  const next = fmtPass(info.next_pass, (Date.now() + clockSkew) / 1000);
+  const key = `${m.norad}|${body.join("|")}|${Math.round(m.alt)}|${next}|${pinned === m.norad}`;
+  if (el.dataset.key !== key) {
+    el.dataset.key = key;
+    el.textContent = "";
+    const t = document.createElement("div"); t.className = "title"; t.textContent = m.name; el.appendChild(t);
+    for (const line of body) { const d = document.createElement("div"); d.textContent = line; el.appendChild(d); }
+    const live = document.createElement("div"); live.className = "live";
+    live.textContent = `Alt ${Math.round(m.alt)} km   next pass ${next}`;
+    el.appendChild(live);
+    el.style.borderColor = m.color === "#000" ? "#d2d2d2" : m.color;      // piMap: black ISS -> light grey
+    el.classList.toggle("pinned", pinned === m.norad);
+  }
+  el.hidden = false;
+  // piMap's placement: up and to the right of the dot, flipped to stay on screen
+  const px = m.x / dpr, py = m.y / dpr, w = el.offsetWidth, h = el.offsetHeight;
+  let bx = px + 14, by = py - h - 12;
+  if (bx + w > view.w - 4) bx = px - w - 14;
+  if (by < 4) by = py + 14;
+  el.style.left = `${Math.max(4, bx)}px`; el.style.top = `${by}px`;
+}
+
 // ---- input (browsers only) --------------------------------------------------------------
 function wireInput() {
   const pts = new Map();               // pointerId -> {x, y}
@@ -273,6 +322,7 @@ function wireInput() {
     }
   });
   over.addEventListener("pointermove", (e) => {
+    if (e.pointerType === "mouse") { pointer = at(e); overAt = 0; }
     if (!pts.has(e.pointerId)) return;
     const p = at(e);
     pts.set(e.pointerId, p);
@@ -303,10 +353,17 @@ function wireInput() {
       if (performance.now() - drag.t < 80) view.fling(drag.vx, drag.vy);
     } else if (drag.button === 2 && home) {
       view.flyTo(conf.map.min_zoom, home.lon, home.lat);          // piMap: right click = reset view
+    } else if (drag.button === 0) {
+      // piMap: click a dot to pin/unpin its bubble; click empty map to dismiss
+      const p = at(e), m = sats.hit(p.x * dpr, p.y * dpr);
+      pinned = m ? (pinned === m.norad ? null : m.norad) : null;
+      if (e.pointerType !== "mouse") pointer = m ? p : null;      // touch: a tap shows it
+      overAt = 0;
     }
     drag = null;
   };
   over.addEventListener("pointerup", end);
+  over.addEventListener("pointerleave", (e) => { if (e.pointerType === "mouse") { pointer = null; overAt = 0; } });
   over.addEventListener("pointercancel", end);
   over.addEventListener("wheel", (e) => {
     e.preventDefault();

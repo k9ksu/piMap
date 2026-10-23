@@ -92,6 +92,17 @@ class Api(unittest.TestCase):
         self.assertEqual(self.c.post("/api/sats", json={"norad": "x"}).status_code, 400)
         self.assertEqual(self.c.get("/api/state").json()["sats"]["shown"], server.choice.shown)
 
+    def test_sat_bubble(self):
+        d = self.c.get("/api/sat/25544").json()
+        self.assertEqual(d["norad"], 25544)
+        self.assertIsInstance(d["lines"], list)
+        self.assertIsInstance(d["note"], str)                       # "" or e.g. "loading radio data..."
+
+    def test_status_labels_as_pimap(self):
+        st = self.c.get("/api/state").json()["status"]
+        self.assertEqual([v["label"] for v in st.values()], ["TLE", "SWX", "QRZ", "FRQ", "WSP"])
+        self.assertEqual(st["qrz"]["state"], "off")                 # not running in piMap 2.0 yet
+
     def test_kiosk_contract(self):
         st = self.c.get("/_fieldlab/status").json()
         self.assertIn(st["state"], ("ready", "degraded", "error"))

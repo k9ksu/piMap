@@ -44,6 +44,7 @@ cfg, CONFIG_SOURCE = load_config()
 
 import applog          # noqa: E402  (piMap's modules import config; it's registered above)
 import geo_boundaries  # noqa: E402
+import sat_radio       # noqa: E402
 import sat_tracker     # noqa: E402
 import space_weather   # noqa: E402
 
@@ -58,7 +59,10 @@ KIOSK = os.environ.get("PIMAP_KIOSK", "0") == "1"
 PAGE_ID = os.environ.get("PIMAP_PAGE_ID", "pimap")          # the kiosk's name for this page
 PAGE_TITLE = os.environ.get("PIMAP_PAGE_TITLE", "piMap")
 GPS_MAX_AGE_S = 6 * 3600
-STATUS_TAGS = ("tle", "swx", "qrz", "frq", "wsp")
+# piMap's status row (overlays._STATUS_LABELS): component -> label. QRZ and WSPR aren't
+# running in piMap 2.0 yet (phases 2 and 3): they show grey, "off", not amber.
+STATUS_TAGS = {"tle": "TLE", "swx": "SWX", "qrz": "QRZ", "freq": "FRQ", "wspr": "WSP"}
+NOT_YET = {"qrz", "wspr"}
 
 
 # ---- home ---------------------------------------------------------------------------
@@ -259,8 +263,11 @@ passes = Passes()
 
 def status_tags() -> dict:
     st = applog.get_status()
-    return {k: {"state": st[k][0], "detail": st[k][1]} if k in st else {"state": "off", "detail": ""}
-            for k in STATUS_TAGS}
+    out = {}
+    for k, label in STATUS_TAGS.items():
+        state, detail = st.get(k, ("off" if k in NOT_YET else "loading", ""))
+        out[k] = {"label": label, "state": state, "detail": detail}
+    return out
 
 
 def space_wx() -> dict:
@@ -371,6 +378,15 @@ def api_sats():
                         headers=NO_STORE)
 
 
+@app.get("/api/sat/{norad}")
+def api_sat(norad: int):
+    """What piMap's bubble shows: active transmitters from SatNOGS (piMap's sat_radio,
+    cached a day), plus the next pass over home."""
+    lines, note = sat_radio.info(norad)
+    return JSONResponse({"norad": norad, "lines": lines, "note": note,
+                         "next_pass": passes.get().get(norad)}, headers=NO_STORE)
+
+
 @app.post("/api/sats")
 async def set_sat(request: Request):
     """{norad: n, on: true|false}: show or hide a satellite on the map."""
@@ -454,6 +470,7 @@ def _start():
     start_mqtt()
     threading.Thread(target=worker.run, name="refresh", daemon=True).start()
     threading.Thread(target=passes.run, name="passes", daemon=True).start()
+    sat_radio.preload_async()             # SatNOGS transmitters for the bubbles
 
 
 def main() -> None:

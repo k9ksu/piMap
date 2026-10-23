@@ -68,6 +68,17 @@ export class Sats {
     this.show = new Set(conf.show || [ISS]);
     this.footprints = conf.footprint !== false;
     this.tracks = true;
+    this.markers = [];                       // last drawn: {norad, name, lat, lon, alt, x, y, hitR, color}
+  }
+
+  /** The marker under (x, y) device px, nearest first, or null. */
+  hit(x, y) {
+    let best = null, bd = Infinity;
+    for (const m of this.markers) {
+      const d = Math.hypot(m.x - x, m.y - y);
+      if (d <= m.hitR && d < bd) { best = m; bd = d; }
+    }
+    return best;
   }
 
   /** The colour a satellite is drawn in (piMap's), for the satellite panel's chips. */
@@ -138,9 +149,12 @@ export class Sats {
         ctx.setLineDash([]);
       }
     }
-    // markers on top of every track
+    // markers on top of every track; remember where, for hover and click
+    this.markers = [];
     for (const s of out) {
       const x = X(s.lon), y = Y(s.lat), r = this.recs.get(s.norad);
+      const hitR = s.norad === ISS ? ((this.conf.iss_width || 62) * u) / 2 : ((this.conf.dot_radius || 6) + 5) * u;
+      this.markers.push({ ...s, x, y, hitR, color: r.color });
       if (s.norad === ISS && this.iss && this.iss.complete && this.iss.naturalWidth) {
         const w = (this.conf.iss_width || 62) * u, h = w * this.iss.naturalHeight / this.iss.naturalWidth;
         const sh = this.conf.iss_shadow || [-7.5, 7.5];
