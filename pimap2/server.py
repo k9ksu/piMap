@@ -53,6 +53,8 @@ PYRAMID = Path(ROOT) / "data" / "pyramid"
 DATA_DIR = Path(os.environ.get("PIMAP_DATA_DIR", os.path.join(ROOT, "data")))
 VIEW_FILE = DATA_DIR / "tv_view.json"
 KIOSK = os.environ.get("PIMAP_KIOSK", "0") == "1"
+PAGE_ID = os.environ.get("PIMAP_PAGE_ID", "pimap")          # the kiosk's name for this page
+PAGE_TITLE = os.environ.get("PIMAP_PAGE_TITLE", "piMap")
 GPS_MAX_AGE_S = 6 * 3600
 STATUS_TAGS = ("tle", "swx", "qrz", "frq", "wsp")
 
@@ -313,7 +315,7 @@ def fieldlab_status():
     beat = worker.beat_t
     since = datetime.fromtimestamp(worker.started, timezone.utc).isoformat(timespec="seconds")
     return JSONResponse({
-        "id": "pimap", "state": state, "message": msg, "detail": detail,
+        "id": PAGE_ID, "state": state, "message": msg, "detail": detail,
         "since": since, "in_state_s": round(now - worker.started, 1),
         "heartbeat": None if beat is None else datetime.fromtimestamp(beat, timezone.utc).isoformat(timespec="seconds"),
         "heartbeat_age_s": None if beat is None else round(now - beat, 1),
@@ -323,7 +325,8 @@ def fieldlab_status():
 
 @app.get("/_fieldlab/meta")
 def fieldlab_meta():
-    return {"id": "pimap", "title": "piMap", "icon": "globe", "order": 25, "kind": "page",
+    return {"id": PAGE_ID, "title": PAGE_TITLE, "icon": "globe",
+            "order": int(os.environ.get("PIMAP_PAGE_ORDER", "25")), "kind": "page",
             "version": VERSION, "start_grace_s": 60, "heartbeat_timeout_s": 180, "holds": False}
 
 
