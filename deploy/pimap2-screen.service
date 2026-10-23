@@ -13,6 +13,7 @@ ExecStartPre=/bin/sh -c 'for i in $(seq 1 60); do xset q >/dev/null 2>&1 && exit
 ExecStartPre=/bin/sh -c 'xrandr --output HDMI-2 --mode 1920x1080 --right-of HDMI-1 || true'
 # ...and for the server to answer.
 ExecStartPre=/bin/sh -c 'for i in $(seq 1 60); do wget -qO- http://127.0.0.1:8090/api/config >/dev/null 2>&1 && exit 0; sleep 1; done; exit 1'
+# Autoplay is allowed so the alert chime sounds without anyone clicking first.
 # The window opens on HDMI-2 (x = HDMI-1's width) and fills it. Its own profile, so
 # it never touches your everyday Chromium. Edit the position if your layout differs.
 ExecStart=/bin/sh -c 'exec "$(command -v chromium-browser || command -v chromium)" \
@@ -20,7 +21,8 @@ ExecStart=/bin/sh -c 'exec "$(command -v chromium-browser || command -v chromium
   --window-position=1920,0 --window-size=1920,1080 \
   --user-data-dir=%h/.cache/pimap2-screen \
   --no-first-run --noerrdialogs --disable-infobars --disable-session-crashed-bubble \
-  --disable-features=Translate --password-store=basic --check-for-update-interval=31536000'
+  --disable-features=Translate --password-store=basic --check-for-update-interval=31536000 \
+  --autoplay-policy=no-user-gesture-required'
 Restart=on-failure
 RestartSec=3
 

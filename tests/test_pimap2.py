@@ -101,7 +101,7 @@ class Api(unittest.TestCase):
     def test_status_labels_as_pimap(self):
         st = self.c.get("/api/state").json()["status"]
         self.assertEqual([v["label"] for v in st.values()], ["TLE", "SWX", "QRZ", "FRQ", "WSP"])
-        self.assertEqual(st["wspr"]["state"], "off")                # not running in piMap 2.0 yet
+        self.assertNotIn(st["wspr"]["state"], ("",))                 # WSPR runs in piMap 2.0 now
 
     def test_tv_settings(self):
         st = self.c.get("/api/state").json()["tv"]["settings"]
@@ -139,6 +139,32 @@ class Api(unittest.TestCase):
         q._apply(qsos)
         self.assertEqual(q.snapshot()["version"], v)                # nothing new: same version
         self.assertEqual(self.c.get("/api/qsos").status_code, 200)
+
+    def test_targets_add_move_remove(self):
+        r = self.c.post("/api/targets", json={"op": "add", "lat": 51.5, "lon": -0.12}).json()
+        t = r["target"]
+        self.assertEqual((t["label"], t["field"]), ("IO91", "IO"))           # piMap's grid labels
+        self.assertTrue(server.TARGETS_FILE.is_file())                      # saved, shared
+        self.assertTrue(self.c.post("/api/targets", json={"op": "move", "id": t["id"], "lat": -33.9, "lon": 151.2}).json()["ok"])
+        d = self.c.get("/api/targets").json()
+        self.assertEqual([x["label"] for x in d["targets"] if x["id"] == t["id"]], ["QF56"])
+        self.assertTrue(self.c.post("/api/targets", json={"op": "remove", "id": t["id"]}).json()["ok"])
+        self.assertFalse(self.c.post("/api/targets", json={"op": "remove", "id": t["id"]}).json()["ok"])
+        self.assertEqual(self.c.post("/api/targets", json={"op": "zap"}).status_code, 400)
+
+    def test_prefs_shared(self):
+        r = self.c.post("/api/prefs", json={"spot_mode": "SSB", "alert_sound": "Bell"}).json()
+        self.assertEqual((r["spot_mode"], r["alert_sound"]), ("SSB", "Bell"))
+        self.assertEqual(self.c.post("/api/prefs", json={"spot_mode": "RTTY"}).json()["spot_mode"], "SSB")
+        self.assertEqual(self.c.get("/api/state").json()["prefs"]["alert_sound"], "Bell")
+        self.c.post("/api/prefs", json={"spot_mode": "FT8", "alert_sound": "Soft Chime"})
+
+    def test_openings_feed(self):
+        server.targets.openings_seq += 1
+        server.targets.openings.append({"seq": server.targets.openings_seq, "target_id": "x", "label": "IO91"})
+        d = self.c.get(f"/api/openings?after={server.targets.openings_seq - 1}").json()
+        self.assertEqual([o["label"] for o in d["openings"]], ["IO91"])
+        self.assertEqual(self.c.get(f"/api/openings?after={d['seq']}").json()["openings"], [])
 
     def test_kiosk_contract(self):
         st = self.c.get("/_fieldlab/status").json()

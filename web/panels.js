@@ -9,11 +9,12 @@ const LEAVE_MS = 800;         // grace after the pointer leaves a panel
 const IDLE_MS = 10000;        // close after this long with no pointer movement
 
 const SETTINGS_KEY = "pimap2.settings";
-export const DEFAULT_SETTINGS = { night: true, borders: true, qsos: true, tracks: true, footprints: true };
+export const DEFAULT_SETTINGS = { night: true, borders: true, qsos: true, targets: true, tracks: true,
+                                  footprints: true, chime: true, volume: 0.8 };
 
-export function loadSettings() {
-  try { return { ...DEFAULT_SETTINGS, ...JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}") }; }
-  catch (e) { return { ...DEFAULT_SETTINGS }; }
+export function loadSettings(defaults = {}) {
+  try { return { ...DEFAULT_SETTINGS, ...defaults, ...JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}") }; }
+  catch (e) { return { ...DEFAULT_SETTINGS, ...defaults }; }
 }
 
 function saveSettings(s) {
@@ -47,7 +48,7 @@ class Flyout {
   }
 }
 
-export function setupPanels({ sats, settings, onSettings, serverNow, onToggleSat, tv = null }) {
+export function setupPanels({ sats, settings, onSettings, serverNow, onToggleSat, tv = null, sound = null }) {
   const left = new Flyout(document.getElementById("setpanel"), "left", document.getElementById("settab"));
   const right = new Flyout(document.getElementById("satpanel"), "right", document.getElementById("sattab"));
   let lastMove = performance.now();
@@ -75,10 +76,13 @@ export function setupPanels({ sats, settings, onSettings, serverNow, onToggleSat
     ["night", "Night shading (grey line)"],
     ["borders", "Country / state borders"],
     ["qsos", "QSO paths"],
+    ["targets", "Target dots"],
     ["tracks", "Satellite tracks"],
     ["footprints", "Satellite footprints"],
+    ...(sound ? [["chime", "Chime when a path opens"]] : []),
   ];
   const tvBoxes = new Map();
+  let syncPrefs = () => {};
   box.textContent = "";
   box.classList.toggle("two", !!tv);
   if (tv) {
@@ -113,6 +117,36 @@ export function setupPanels({ sats, settings, onSettings, serverNow, onToggleSat
     row.appendChild(name);
     box.appendChild(row);
   }
+  // spot mode and alert sound (shared, like piMap's ui_prefs), your volume, a test button
+  // sound: null without target dots; else {modes, sounds, get: () => prefs, set: async (p) => ok, test: () => {}}
+  const extra = document.getElementById("setextra");
+  extra.textContent = "";
+  if (sound) {
+    const pick = (label, options, key) => {
+      const row = document.createElement("label"); row.className = "row pick";
+      const t = document.createElement("span"); t.textContent = label;
+      const sel = document.createElement("select");
+      for (const o of options) { const op = document.createElement("option"); op.value = op.textContent = o; sel.appendChild(op); }
+      sel.value = (sound.get() || {})[key] || options[0];
+      sel.addEventListener("change", async () => { if (!(await sound.set({ [key]: sel.value }))) sel.value = (sound.get() || {})[key]; });
+      row.append(t, sel); extra.appendChild(row);
+      return sel;
+    };
+    const modeSel = pick("Spot mode (dot = mode likelihood)", sound.modes, "spot_mode");
+    const soundSel = pick("Alert sound", sound.sounds, "alert_sound");
+    const vol = document.createElement("label"); vol.className = "row pick";
+    const vt = document.createElement("span"); vt.textContent = "Chime volume (this browser)";
+    const range = document.createElement("input"); range.type = "range"; range.min = "0"; range.max = "1"; range.step = "0.05";
+    range.value = String(settings.volume ?? 0.8);
+    range.addEventListener("change", () => { settings.volume = Number(range.value); saveSettings(settings); });
+    vol.append(vt, range); extra.appendChild(vol);
+    const test = document.createElement("button"); test.className = "test"; test.textContent = "Test chime";
+    test.addEventListener("click", () => sound.test());
+    extra.appendChild(test);
+    syncPrefs = (p) => { if (p && document.activeElement !== modeSel) modeSel.value = p.spot_mode;
+                         if (p && document.activeElement !== soundSel) soundSel.value = p.alert_sound; };
+  }
+
   /** Keep the TV column in step with the server (another browser may change it). */
   function syncTv(st) {
     for (const [key, t] of tvBoxes) if (!t.disabled) t.checked = !!(st || {})[key];
@@ -167,5 +201,5 @@ export function setupPanels({ sats, settings, onSettings, serverNow, onToggleSat
   setInterval(() => { if (right.open) tick(); }, 1000);
   setInterval(() => { if (right.open) refresh(); }, 60000);
 
-  return { refresh, syncTv };  // the satellite list is rebuilt each time its panel opens
+  return { refresh, syncTv, syncPrefs: (p) => syncPrefs(p) };   // the satellite list is rebuilt each time its panel opens
 }

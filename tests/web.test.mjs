@@ -6,6 +6,8 @@ import { footprint, splitDateline } from "../web/sats.js";
 import { View } from "../web/view.js";
 import { fmtPass } from "../web/panels.js";
 import { greatCircle } from "../web/qsos.js";
+import { mergeSummary } from "../web/targets.js";
+import { render, SOUND_NAMES } from "../web/chime.js";
 
 test("sun: declination through the year", () => {
   assert.ok(Math.abs(subsolar(new Date("2026-03-20T14:46:00Z")).lat) < 0.3);         // equinox
@@ -77,4 +79,19 @@ test("QSO path: great circle from Kansas to Tokyo", () => {
   assert.ok(Math.abs(p[0].lat - 38.92) < 1e-9 && Math.abs(p[100].lon - 139.71) < 1e-9);
   const north = Math.max(...p.map((q) => q.lat));
   assert.ok(north > 55 && north < 70, `goes up over Alaska: ${north}`);
+});
+
+test("target dot: the more open source wins (piMap's _merge_summary)", () => {
+  assert.equal(mergeSummary("quiet", {}), "quiet");
+  assert.equal(mergeSummary("red", { 14: { state: "green" } }), "green");
+  assert.equal(mergeSummary("yellow", { 7: { state: "weak" } }), "yellow");
+  assert.equal(mergeSummary("quiet", { 7: { state: "none" } }), "red");
+});
+
+test("chime: piMap's five sounds render, normalised, ending silent", () => {
+  assert.deepEqual(SOUND_NAMES, ["Soft Chime", "Marimba", "Bell", "Music Box", "Ascending Triad"]);
+  const buf = render([[0, 0.55, [[523.25, 1.0], [1046.5, 0.18]], 0.012, 0.32], [0.16, 0.68, [[784, 1], [1568, 0.18]], 0.012, 0.4]], 8000);
+  assert.ok(buf.length > 0.8 * 8000);
+  assert.ok(Math.max(...buf.map(Math.abs)) <= 0.75 + 1e-6);
+  assert.equal(buf[buf.length - 1], 0);
 });

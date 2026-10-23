@@ -17,6 +17,8 @@ import { Night, subsolar, sunElevation } from "./sky.js";
 import { Sats } from "./sats.js";
 import { Borders } from "./borders.js";
 import { Qsos } from "./qsos.js";
+import { Targets, STATE_COLORS } from "./targets.js";
+import { Chime } from "./chime.js";
 import { setupPanels, loadSettings, DEFAULT_SETTINGS, fmtPass } from "./panels.js";
 
 const TV = document.documentElement.classList.contains("tv");
@@ -27,7 +29,11 @@ const $ = (id) => document.getElementById(id);
 const base = $("base"), over = $("over");
 const bctx = base.getContext("2d", { alpha: false }), octx = over.getContext("2d");
 
-let conf = null, view = null, tiles = null, night = null, sats = null, borders = null, qsos = null;
+let conf = null, view = null, tiles = null, night = null, sats = null, borders = null, qsos = null, targets = null;
+const chime = new Chime();
+let openingsSeen = -1, targetsAt = 0;
+let detail = null;                   // the bubble's drill-down: {id, band, source, data}
+let bubbleHover = false, shownKey = null;
 let state = null, home = null, dpr = 1, u = 1;
 let baseDirty = true, overAt = 0, tleVersion = -1, tvSeen = null;
 let speed = 0, speedAt = 0, changedAt = 0;
@@ -58,6 +64,7 @@ async function start() {
   tiles = new Tiles(conf.pyramid, { maxTiles: TV ? 140 : 180, onLoad: () => { baseDirty = true; } });
   night = conf.map.greyline ? new Night(conf.map.night_alpha) : null;
   qsos = new Qsos({ color: conf.colors.qso, dot_radius: (conf.qso || {}).dot_radius });
+  targets = new Targets(conf.targets || {});
   borders = new Borders(conf.boundaries || { enabled: false }, $("lines"));
   if (borders.conf.enabled) {
     getJSON("api/boundaries").then((d) => { borders.load(d.lines); baseDirty = true; }).catch(() => {});
@@ -71,14 +78,21 @@ async function start() {
   window.addEventListener("resize", resize);
   if (!TV) {
     wireInput();
-    settings = loadSettings();
+    wireBubble();
+    // the chime: on for the shack screen; on the kiosk only the TV chimes unless a browser opts in
+    settings = loadSettings({ chime: !conf.kiosk && (conf.targets ? conf.targets.sound_on : true),
+                              volume: conf.targets ? conf.targets.volume : 0.8 });
     applySettings(settings);
     panels = setupPanels({ sats, settings, onSettings: applySettings, onToggleSat: toggleSat,
                   serverNow: () => (Date.now() + clockSkew) / 1000,
-                  tv: conf.kiosk ? { get: () => state && state.tv.settings, set: setTvSetting } : null });
+                  tv: conf.kiosk ? { get: () => state && state.tv.settings, set: setTvSetting } : null,
+                  sound: conf.targets && conf.targets.wspr_on ? {
+                    modes: conf.targets.modes, sounds: conf.targets.sounds, get: () => state && state.prefs,
+                    set: setPrefs, test: () => { chime.unlock(); chime.play(state.prefs.alert_sound, settings.volume ?? 0.8); },
+                  } : null });
   }
   if (!TV && conf.kiosk) wireTvPanel();
-  if (QS.get("debug")) window.__pimap = { view, sats, tiles, borders, get settings() { return settings; } };   // for measuring and tests
+  if (QS.get("debug")) window.__pimap = { view, sats, tiles, borders, targets, chime, get settings() { return settings; } };   // for measuring and tests
   await poll();
   setInterval(poll, 5000);
   setInterval(clock, 250);
@@ -105,6 +119,7 @@ async function poll() {
   if (state.qso_version !== undefined && state.qso_version !== qsos.version) {
     try { qsos.set(await getJSON("api/qsos")); overAt = 0; } catch (e) { /* next poll */ }
   }
+  await pollTargets();
   if (state.sats && state.sats.version !== satsVersion) {
     satsVersion = state.sats.version; sats.show = new Set(state.sats.shown); overAt = 0;
   }
@@ -118,9 +133,13 @@ async function poll() {
   const tvs = JSON.stringify(state.tv.settings || {});
   if (tvs !== tvSettingsKey) {
     tvSettingsKey = tvs;
-    if (TV) { settings = { ...DEFAULT_SETTINGS, ...state.tv.settings }; applySettings(settings); }
+    if (TV) {
+      settings = { ...DEFAULT_SETTINGS, volume: conf.targets ? conf.targets.volume : 0.8, ...state.tv.settings };
+      applySettings(settings);
+    }
     else if (panels) panels.syncTv(state.tv.settings);
   }
+  if (panels && state.prefs) panels.syncPrefs(state.prefs);
   const tvKey = `${state.tv.zoom}|${h.lat}|${h.lon}`;
   if (tvSeen === null) {
     view.set(state.tv.zoom, h.lon, h.lat);          // everyone opens on the TV view
@@ -192,7 +211,7 @@ function frame(t) {
   // satellites: redraw often enough that the fastest moves ~0.2 device px per redraw
   if (t - speedAt > 1000 || viewMoved) { speed = sats.count ? sats.speedPx(view, dpr) : 0; speedAt = t; }
   const every = speed > 0 ? Math.min(1000, Math.max(16, 200 / speed)) : 1000;
-  if (viewMoved || moving || t - overAt >= every) drawOver(t);
+  if (viewMoved || moving || targets.pinging || targets.drag || t - overAt >= every) drawOver(t);
   view.changed = false;
   requestAnimationFrame(frame);
 }
@@ -242,6 +261,8 @@ function drawOver(t) {
   octx.beginPath(); octx.rect(L, T, view.x(180) * dpr - L, view.y(-90) * dpr - T); octx.clip();
   if (settings.qsos !== false && !OFF.has("qsos")) qsos.draw(octx, view, dpr, u);
   else qsos.markers = [];
+  if (settings.targets !== false && !OFF.has("targets")) targets.draw(octx, view, dpr, u);
+  else targets.markers = [];
   if (!OFF.has("sats")) sats.draw(octx, view, dpr, u);
   octx.restore();
   if (!TV) bubble();
@@ -285,11 +306,16 @@ async function radioInfo(norad) {
   overAt = 0;
 }
 
-/** The dot under (x, y) device px: a satellite or a QSO, whichever is nearer. */
+/** The dot under (x, y) device px: a target, QSO or satellite, whichever is nearest. */
 function hitAny(x, y) {
-  const a = settings.qsos !== false ? qsos.hit(x, y) : null, b = sats.hit(x, y);
-  if (!a || !b) return a || (b && { ...b, kind: "sat", key: `sat:${b.norad}` });
-  return Math.hypot(a.x - x, a.y - y) <= Math.hypot(b.x - x, b.y - y) ? a : { ...b, kind: "sat", key: `sat:${b.norad}` };
+  const c = [];
+  if (settings.targets !== false) c.push(targets.hit(x, y));
+  if (settings.qsos !== false) c.push(qsos.hit(x, y));
+  const sm = sats.hit(x, y);
+  if (sm) c.push({ ...sm, kind: "sat", key: `sat:${sm.norad}` });
+  let best = null, bd = Infinity;
+  for (const m of c) { if (!m) continue; const d = Math.hypot(m.x - x, m.y - y); if (d < bd) { best = m; bd = d; } }
+  return best;
 }
 
 function findMarker(key) {
@@ -297,6 +323,7 @@ function findMarker(key) {
     const m = sats.markers.find((k) => `sat:${k.norad}` === key);
     return m ? { ...m, kind: "sat", key } : null;
   }
+  if (key.startsWith("target:")) return targets.markers.find((k) => k.key === key) || null;
   return qsos.markers.find((k) => k.key === key) || null;
 }
 
@@ -305,33 +332,164 @@ function bubble() {
   let m = pinned !== null ? findMarker(pinned) : null;
   if (pinned !== null && !m) pinned = null;                   // its dot went away (unchecked, aged out)
   if (!m && pointer) m = hitAny(pointer.x * dpr, pointer.y * dpr);
-  if (!m) { el.hidden = true; return; }
-  let title = m.name, body, live = null;
-  if (m.kind === "sat") {
-    radioInfo(m.norad);
-    const info = radio.get(m.norad) || { lines: [], note: "loading radio data..." };
-    body = info.lines && info.lines.length ? info.lines : [info.note];
-    live = `Alt ${Math.round(m.alt)} km   next pass ${fmtPass(info.next_pass, (Date.now() + clockSkew) / 1000)}`;
+  if (!m && bubbleHover && shownKey) m = findMarker(shownKey); // piMap: the cursor is inside the bubble: keep it
+  if (!m) { el.hidden = true; shownKey = null; bubbleHover = false; if (detail) detail = null; return; }
+  if (detail && (m.kind !== "target" || detail.id !== m.id)) detail = null;
+  shownKey = m.key;
+  let key, fill;
+  if (m.kind === "target") {
+    targets.ack(m.id);
+    ({ key, fill } = targetBubble(m));
   } else {
-    body = m.lines && m.lines.length ? m.lines : [""];                    // piMap's QSO lines
+    let body, live = null;
+    if (m.kind === "sat") {
+      radioInfo(m.norad);
+      const info = radio.get(m.norad) || { lines: [], note: "loading radio data..." };
+      body = info.lines && info.lines.length ? info.lines : [info.note];
+      live = `Alt ${Math.round(m.alt)} km   next pass ${fmtPass(info.next_pass, (Date.now() + clockSkew) / 1000)}`;
+    } else {
+      body = m.lines && m.lines.length ? m.lines : [""];                  // piMap's QSO lines
+    }
+    key = `${m.key}|${body.join("|")}|${live}`;
+    fill = () => {
+      const t = document.createElement("div"); t.className = "title"; t.textContent = m.name; el.appendChild(t);
+      for (const line of body) { const d = document.createElement("div"); d.textContent = line; el.appendChild(d); }
+      if (live) { const d = document.createElement("div"); d.className = "live"; d.textContent = live; el.appendChild(d); }
+    };
   }
-  const key = `${m.key}|${body.join("|")}|${live}|${pinned === m.key}`;
+  key += `|${pinned === m.key}`;
   if (el.dataset.key !== key) {
     el.dataset.key = key;
     el.textContent = "";
-    const t = document.createElement("div"); t.className = "title"; t.textContent = title; el.appendChild(t);
-    for (const line of body) { const d = document.createElement("div"); d.textContent = line; el.appendChild(d); }
-    if (live) { const d = document.createElement("div"); d.className = "live"; d.textContent = live; el.appendChild(d); }
+    fill();
     el.style.borderColor = m.color === "#000" ? "#d2d2d2" : m.color;      // piMap: black ISS -> light grey
     el.classList.toggle("pinned", pinned === m.key);
+    el.classList.toggle("interactive", m.kind === "target");
   }
   el.hidden = false;
+  if (bubbleHover) return;                                       // don't move it out from under the mouse
   // piMap's placement: up and to the right of the dot, flipped to stay on screen
   const px = m.x / dpr, py = m.y / dpr, w = el.offsetWidth, h = el.offsetHeight;
   let bx = px + 14, by = py - h - 12;
   if (bx + w > view.w - 4) bx = px - w - 14;
   if (by < 4) by = py + 14;
+  if (by + h > view.h - 4) by = Math.max(4, view.h - 4 - h);
   el.style.left = `${Math.max(4, bx)}px`; el.style.top = `${by}px`;
+}
+
+const fmtSnr = (v) => (typeof v === "number" ? (v >= 0 ? `+${v}` : `${v}`) : "");
+
+/** piMap's target bubble: grid [field], the field's biggest cities, then FT8 | WSPR per band. */
+function targetBubble(m) {
+  const t = m.target, d = targets.data, el = $("bubble");
+  if (detail) return detailBubble(m);
+  const wspr = (d.wspr[t.id] || {}).bands || [], ft8 = d.ft8[t.field] || {};
+  const metrosList = d.metros[t.field];
+  const bands = [...new Set([...wspr.map((b) => b.band), ...Object.keys(ft8).map(Number)])].sort((a, b) => a - b);
+  const byBand = Object.fromEntries(wspr.map((b) => [b.band, b]));
+  const rows = bands.map((band) => {
+    const w = byBand[band], f = ft8[band];
+    const label = (w && w.label) || d.band_labels[String(band)] || `${band}MHz`;
+    const fc = f ? [f.state, `${f.stations} sta ${fmtSnr(f.best_snr)}`] : ["none", "--"];
+    const wc = w && w.cnt > 0
+      ? [w.state, `${w.cnt} sp ${fmtSnr(w.best_snr)}${w.age_min != null ? ` ${Math.round(w.age_min)}m` : ""}`]
+      : ["none", "--"];
+    return { band, label, fc, wc };
+  });
+  const key = `${m.key}|${JSON.stringify(rows)}|${JSON.stringify(metrosList)}|${d.ft8_on}`;
+  const fill = () => {
+    const title = document.createElement("div"); title.className = "title";
+    title.textContent = `${t.label}  [${t.field}]`; el.appendChild(title);
+    const mt = metrosList == null ? ["cities loading..."] : metrosList.length ? metrosList.map((c) => `* ${c}`) : ["no major metros"];
+    for (const c of mt) { const x = document.createElement("div"); x.className = "metro"; x.textContent = c; el.appendChild(x); }
+    const tb = document.createElement("table"); tb.className = "bands";
+    const cols = d.ft8_on ? ["ft8", "wspr"] : ["wspr"];
+    tb.innerHTML = `<tr><th>band</th>${d.ft8_on ? '<th class="ft8">FT8</th>' : ""}<th class="wspr">WSPR</th></tr>`;
+    for (const r of rows) {
+      const tr = document.createElement("tr");
+      const th = document.createElement("td"); th.className = "band"; th.textContent = r.label; tr.appendChild(th);
+      for (const src of cols) {
+        const [st, txt] = src === "ft8" ? r.fc : r.wc;
+        const td = document.createElement("td"); td.className = "cell";
+        td.dataset.band = r.band; td.dataset.source = src;
+        const dot = document.createElement("span"); dot.className = "sdot";
+        dot.style.background = STATE_COLORS[st === "weak" || st === "none" ? "red" : st] || STATE_COLORS.red;
+        td.append(dot, document.createTextNode(txt));
+        tr.appendChild(td);
+      }
+      tb.appendChild(tr);
+    }
+    el.appendChild(tb);
+    const hint = document.createElement("div"); hint.className = "hint";
+    hint.textContent = TV ? "" : "click a cell for stations | middle-click removes";
+    el.appendChild(hint);
+  };
+  return { key, fill };
+}
+
+/** piMap's drill-down: who is being heard on one band, both directions. */
+function detailBubble(m) {
+  const el = $("bubble"), d = detail.data || { state: "loading" };
+  const key = `${m.key}|detail|${detail.band}|${detail.source}|${d.state}|${(d.hearing || []).length}|${(d.heard_by || []).length}`;
+  const fill = () => {
+    const head = document.createElement("div"); head.className = "title";
+    const back = document.createElement("button"); back.className = "back"; back.textContent = "‹ back";
+    back.dataset.back = "1";
+    head.append(back, document.createTextNode(`  ${d.label || m.target.label} ${d.band_label || ""} ${detail.source.toUpperCase()}`));
+    el.appendChild(head);
+    if (d.state !== "ok") {
+      const x = document.createElement("div"); x.className = "metro";
+      x.textContent = d.state === "error" ? `couldn't fetch: ${d.error || "?"}` : "fetching spots...";
+      el.appendChild(x); return;
+    }
+    const section = (label, list, n) => {
+      const h = document.createElement("div"); h.className = "sec";
+      h.textContent = `${label} (${list.length} stations, ${n || 0} spots)`; el.appendChild(h);
+      if (!list.length) { const x = document.createElement("div"); x.className = "metro"; x.textContent = "nobody"; el.appendChild(x); return; }
+      const tb = document.createElement("table"); tb.className = "spots";
+      for (const g of list.slice(0, 12)) {
+        const tr = document.createElement("tr");
+        const extra = g.km ? `${g.km} km` : (g.by ? `by ${g.by}` : "");
+        for (const v of [g.sign, g.loc || "", fmtSnr(g.best_snr), extra, `${Math.round(g.age_min || 0)}m`]) {
+          const td = document.createElement("td"); td.textContent = v; tr.appendChild(td);
+        }
+        tb.appendChild(tr);
+      }
+      el.appendChild(tb);
+      if (list.length > 12) { const x = document.createElement("div"); x.className = "hint"; x.textContent = `+${list.length - 12} more`; el.appendChild(x); }
+    };
+    section("Hearing them", d.hearing || [], d.n_in);
+    section("They hear us", d.heard_by || [], d.n_out);
+    const f = document.createElement("div"); f.className = "hint";
+    f.textContent = `home = ${d.home_scope || ""} round you, last ${d.window_min || ""} min`; el.appendChild(f);
+  };
+  return { key, fill };
+}
+
+async function openDetail(id, band, source) {
+  detail = { id, band, source, data: null };
+  for (let i = 0; i < 30 && detail && detail.id === id && detail.band === band && detail.source === source; i++) {
+    try {
+      const d = await getJSON(`api/target-detail?id=${encodeURIComponent(id)}&band=${band}&source=${source}`);
+      if (!detail || detail.id !== id || detail.band !== band || detail.source !== source) return;
+      detail.data = d; overAt = 0;
+      if (d.state !== "loading") return;
+    } catch (e) { if (detail) detail.data = { state: "error", error: "server unreachable" }; return; }
+    await sleep(1000);
+  }
+}
+
+function wireBubble() {
+  const el = $("bubble");
+  el.addEventListener("pointerenter", () => { if (el.classList.contains("interactive")) bubbleHover = true; });
+  el.addEventListener("pointerleave", () => { bubbleHover = false; overAt = 0; });
+  el.addEventListener("click", (e) => {
+    const m = shownKey && findMarker(shownKey);
+    if (!m || m.kind !== "target") return;
+    if (e.target.closest("[data-back]")) { detail = null; overAt = 0; return; }
+    const cell = e.target.closest("td.cell");
+    if (cell) { pinned = m.key; openDetail(m.id, Number(cell.dataset.band), cell.dataset.source); overAt = 0; }
+  });
 }
 
 // ---- input (browsers only) --------------------------------------------------------------
@@ -342,11 +500,18 @@ function wireInput() {
 
   over.addEventListener("contextmenu", (e) => e.preventDefault());
   over.addEventListener("pointerdown", (e) => {
+    chime.unlock();                                    // a browser may make sound once it's been clicked
     over.setPointerCapture(e.pointerId);
     pts.set(e.pointerId, at(e));
     if (pts.size === 1) {
-      const p = at(e);
-      drag = { x: p.x, y: p.y, x0: p.x, y0: p.y, t: performance.now(), vx: 0, vy: 0, button: e.button, moved: false };
+      const p = at(e), hit = hitAny(p.x * dpr, p.y * dpr);
+      if (e.button === 1) {                            // piMap: middle-click a target dot removes it
+        e.preventDefault();
+        if (hit && hit.kind === "target") { editTarget({ op: "remove", id: hit.id }); if (pinned === hit.key) pinned = null; }
+        return;
+      }
+      drag = { x: p.x, y: p.y, x0: p.x, y0: p.y, t: performance.now(), vx: 0, vy: 0, button: e.button, moved: false,
+               target: e.button === 0 && hit && hit.kind === "target" ? hit : null };
       view.vel = null;
     } else if (pts.size === 2) {
       const [a, b] = [...pts.values()];
@@ -373,6 +538,12 @@ function wireInput() {
     const now = performance.now(), dx = p.x - drag.x, dy = p.y - drag.y, dt = Math.max(1, now - drag.t) / 1000;
     if (!drag.moved && Math.hypot(p.x - drag.x0, p.y - drag.y0) < 6) return;     // piMap's drag threshold
     drag.moved = true; over.classList.add("dragging");
+    if (drag.target) {                                 // piMap: left-drag a target dot moves it
+      targets.drag = { id: drag.target.id, lat: Math.max(-89.9, Math.min(89.9, view.latAt(p.y))),
+                       lon: Math.max(-180, Math.min(180, view.lonAt(p.x))) };
+      drag.x = p.x; drag.y = p.y; drag.t = now; overAt = 0;
+      return;
+    }
     view.panBy(dx, dy);
     drag.vx = 0.8 * (dx / dt) + 0.2 * drag.vx; drag.vy = 0.8 * (dy / dt) + 0.2 * drag.vy;
     drag.x = p.x; drag.y = p.y; drag.t = now;
@@ -382,7 +553,10 @@ function wireInput() {
     if (pts.size < 2) pinch = null;
     if (!drag) return;
     over.classList.remove("dragging");
-    if (drag.moved) {
+    if (drag.moved && drag.target && targets.drag) {
+      const td = targets.drag;
+      editTarget({ op: "move", id: td.id, lat: td.lat, lon: td.lon }).then(() => { targets.drag = null; overAt = 0; });
+    } else if (drag.moved) {
       if (performance.now() - drag.t < 80) view.fling(drag.vx, drag.vy);
     } else if (drag.button === 2 && home) {
       view.flyTo(conf.map.min_zoom, home.lon, home.lat);          // piMap: right click = reset view
@@ -396,6 +570,20 @@ function wireInput() {
     drag = null;
   };
   over.addEventListener("pointerup", end);
+  over.addEventListener("dblclick", (e) => {           // piMap: double-click empty map drops a target dot
+    if (!conf.targets || !conf.targets.wspr_on) return;
+    const p = at(e);
+    if (hitAny(p.x * dpr, p.y * dpr)) return;
+    const lon = view.lonAt(p.x), lat = view.latAt(p.y);
+    if (lon < -180 || lon > 180 || lat < -90 || lat > 90) return;
+    editTarget({ op: "add", lat, lon }).then((r) => { if (r.ok && r.target) pinned = `target:${r.target.id}`; });
+  });
+  document.addEventListener("keydown", (e) => {        // piMap: Delete/Backspace over a target dot removes it
+    if (e.key !== "Delete" && e.key !== "Backspace") return;
+    if (e.target && /input|select|textarea/i.test(e.target.tagName)) return;
+    const m = pointer && hitAny(pointer.x * dpr, pointer.y * dpr);
+    if (m && m.kind === "target") { e.preventDefault(); editTarget({ op: "remove", id: m.id }); if (pinned === m.key) pinned = null; }
+  });
   over.addEventListener("pointerleave", (e) => { if (e.pointerType === "mouse") { pointer = null; overAt = 0; } });
   over.addEventListener("pointercancel", end);
   over.addEventListener("wheel", (e) => {
@@ -427,6 +615,45 @@ function wireTvPanel() {
   $("tvin").addEventListener("click", () => send(state.tv.zoom * step()));
   $("tvout").addEventListener("click", () => send(state.tv.zoom / step()));
   $("tvmine").addEventListener("click", () => send(view.zoom));
+}
+
+// ---- target dots: status, and the chime when a path opens -------------------------------------
+async function pollTargets() {
+  const ts = state.targets;
+  if (!ts || !conf.targets || !conf.targets.wspr_on) return;
+  // WSPR re-polls every 5 minutes and FT8 changes all the time: refresh while there are dots
+  if (ts.version !== targets.version || (targets.data.targets.length && Date.now() - targetsAt > 15000)) {
+    try { targets.set(await getJSON("api/targets")); targetsAt = Date.now(); overAt = 0; $("bubble").dataset.key = ""; }
+    catch (e) { /* next poll */ }
+  }
+  if (openingsSeen < 0) { openingsSeen = ts.openings_seq; return; }     // don't chime for old news
+  if (ts.openings_seq > openingsSeen) {
+    try {
+      const d = await getJSON(`api/openings?after=${openingsSeen}`);
+      openingsSeen = d.seq;
+      for (const o of d.openings) targets.opened(o.target_id);
+      if (d.openings.length && settings.chime) chime.play(state.prefs.alert_sound, settings.volume ?? conf.targets.volume);
+      overAt = 0;
+    } catch (e) { /* next poll */ }
+  }
+}
+
+async function editTarget(body) {
+  try {
+    const r = await getJSON("api/targets", { method: "POST", headers: { "content-type": "application/json" },
+                                             body: JSON.stringify(body) });
+    if (r.ok) { targets.set(await getJSON("api/targets")); targetsAt = Date.now(); overAt = 0; }
+    return r;
+  } catch (e) { return { ok: false }; }
+}
+
+async function setPrefs(p) {
+  try {
+    const r = await getJSON("api/prefs", { method: "POST", headers: { "content-type": "application/json" },
+                                           body: JSON.stringify(p) });
+    if (r.ok) { state.prefs = { spot_mode: r.spot_mode, alert_sound: r.alert_sound }; targetsAt = 0; }
+    return r.ok;
+  } catch (e) { return false; }
 }
 
 // ---- the edge panels' effects ------------------------------------------------------------

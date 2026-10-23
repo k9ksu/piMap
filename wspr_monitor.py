@@ -111,6 +111,16 @@ def configure(home_field, targets):
         _wake.set()  # targets changed — re-poll now instead of waiting out the TTL
 
 
+def set_home(lat, lon):
+    """Move the home end of every path (the WSPR_HOME_RADIUS_KM circle) to (lat, lon):
+    piMap 2.0 on the FieldLab trailer follows its GPS. Re-polls at once if it changed."""
+    global _HOME_LAT, _HOME_LON
+    lat, lon = float(lat), float(lon)
+    if (lat, lon) != (_HOME_LAT, _HOME_LON):
+        _HOME_LAT, _HOME_LON = lat, lon
+        _wake.set()
+
+
 def get_status():
     """Snapshot: {target_id: {"summary": state, "bands": [...]}}. Never blocks."""
     with _lock:

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 import math
 import os
 import threading
@@ -47,6 +48,10 @@ import geo_boundaries  # noqa: E402
 import sat_radio       # noqa: E402
 import n3fjp_status    # noqa: E402
 import qrz_client      # noqa: E402
+import metros          # noqa: E402
+import wspr_monitor    # noqa: E402
+import ft8_monitor     # noqa: E402
+from maidenhead import latlon_to_field, latlon_to_maidenhead  # noqa: E402
 import sat_tracker     # noqa: E402
 import space_weather   # noqa: E402
 
@@ -64,7 +69,7 @@ GPS_MAX_AGE_S = 6 * 3600
 # piMap's status row (overlays._STATUS_LABELS): component -> label. QRZ and WSPR aren't
 # running in piMap 2.0 yet (phases 2 and 3): they show grey, "off", not amber.
 STATUS_TAGS = {"tle": "TLE", "swx": "SWX", "qrz": "QRZ", "freq": "FRQ", "wspr": "WSP"}
-NOT_YET = {"wspr"}
+NOT_YET: set = set()
 
 
 # ---- home ---------------------------------------------------------------------------
@@ -173,12 +178,13 @@ def save_tv_zoom(z: float) -> float:
 
 
 TV_SETTINGS_FILE = DATA_DIR / "tv_settings.json"
-TV_SETTING_KEYS = ("night", "borders", "qsos", "tracks", "footprints")
+TV_SETTING_KEYS = ("night", "borders", "qsos", "targets", "tracks", "footprints", "chime")
 
 
 def load_tv_settings() -> dict:
     """What the TV draws (the left menu's TV column): all on unless saved otherwise."""
     out = {k: True for k in TV_SETTING_KEYS}
+    out["chime"] = bool(get(cfg, "ALERT_SOUND_ENABLED", True))
     try:
         saved = json.loads(TV_SETTINGS_FILE.read_text())
         out.update({k: bool(saved[k]) for k in TV_SETTING_KEYS if k in saved})
@@ -369,6 +375,165 @@ class Qsos:
 qsos_worker = Qsos()
 
 
+# ---- target dots: WSPR (and FT8) propagation from home to dots on the map -------------
+WSPR_ON = bool(get(cfg, "WSPR_TARGETS_ENABLED", True))
+# FT8 streams PSKReporter all day: on the FieldLab kiosk (Starlink) it's off by
+# default (PIMAP_FT8=0); at the shack it follows FT8_ENABLED as piMap always has.
+FT8_ON = bool(get(cfg, "FT8_ENABLED", True)) and os.environ.get("PIMAP_FT8", "") != "0"
+TARGETS_FILE = DATA_DIR / "targets.json"
+PREFS_FILE = DATA_DIR / "prefs.json"
+SOUNDS = ["Soft Chime", "Marimba", "Bell", "Music Box", "Ascending Triad"]   # piMap's alerts.py
+
+
+def _read_json(*paths, default):
+    for p in paths:
+        try:
+            return json.loads(Path(p).read_text())
+        except (OSError, ValueError):
+            continue
+    return default
+
+
+def _write_json(path: Path, data) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, indent=2))
+        tmp.replace(path)
+    except OSError as e:
+        log.warning("can't save %s: %s", path.name, e)
+
+
+class Prefs:
+    """piMap's ui_prefs: spot mode and alert sound, shared by every screen."""
+
+    def __init__(self):
+        p = _read_json(PREFS_FILE, Path(ROOT) / "ui_prefs.json", default={})
+        modes = wspr_monitor.modes()
+        self.spot_mode = p.get("spot_mode") if p.get("spot_mode") in modes else get(cfg, "WSPR_MODE", modes[0])
+        self.alert_sound = p.get("alert_sound") if p.get("alert_sound") in SOUNDS else get(cfg, "ALERT_SOUND", SOUNDS[0])
+        self.apply()
+
+    def apply(self):
+        wspr_monitor.set_mode(self.spot_mode)
+        ft8_monitor.set_mode(self.spot_mode)
+
+    def set(self, spot_mode=None, alert_sound=None) -> dict:
+        if spot_mode in wspr_monitor.modes():
+            self.spot_mode = spot_mode
+        if alert_sound in SOUNDS:
+            self.alert_sound = alert_sound
+        self.apply()
+        _write_json(PREFS_FILE, self.get())
+        return self.get()
+
+    def get(self) -> dict:
+        return {"spot_mode": self.spot_mode, "alert_sound": self.alert_sound}
+
+
+class Targets:
+    """piMap's target dots, kept on the server (data/targets.json; a shack piMap's own
+    targets.json is picked up the first time), so the TV and every browser share them."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        raw = _read_json(TARGETS_FILE, Path(ROOT) / "targets.json", default=[])
+        self.list = []
+        for t in raw if isinstance(raw, list) else []:
+            try:
+                self.list.append(self._make(float(t["lat"]), float(t["lon"]), t.get("id")))
+            except (KeyError, TypeError, ValueError):
+                continue
+        self.version = 1
+        self.openings: list[dict] = []          # recent openings, numbered, for every screen's chime
+        self.openings_seq = 0
+        self.home_key = None
+
+    @staticmethod
+    def _make(lat, lon, tid=None):
+        lat, lon = max(-89.99, min(89.99, lat)), ((lon + 180) % 360) - 180
+        return {"id": tid or uuid.uuid4().hex[:8], "lat": round(lat, 4), "lon": round(lon, 4),
+                "field": latlon_to_field(lat, lon), "label": latlon_to_maidenhead(lat, lon, 4)}
+
+    def _changed(self):
+        self.version += 1
+        _write_json(TARGETS_FILE, self.list)
+        self.configure()
+
+    def configure(self):
+        h = home.now()
+        with self.lock:
+            targets = [dict(t) for t in self.list]
+        if WSPR_ON:
+            wspr_monitor.set_home(h["lat"], h["lon"])
+            wspr_monitor.configure(latlon_to_field(h["lat"], h["lon"]), targets)
+        if FT8_ON:
+            ft8_monitor.configure(targets)
+
+    def add(self, lat, lon) -> dict:
+        t = self._make(lat, lon)
+        with self.lock:
+            self.list.append(t)
+        self._changed()
+        return t
+
+    def move(self, tid, lat, lon) -> bool:
+        with self.lock:
+            i = next((i for i, t in enumerate(self.list) if t["id"] == tid), None)
+            if i is None:
+                return False
+            self.list[i] = self._make(lat, lon, tid)
+        self._changed()
+        return True
+
+    def remove(self, tid) -> bool:
+        with self.lock:
+            n = len(self.list)
+            self.list = [t for t in self.list if t["id"] != tid]
+            gone = len(self.list) != n
+        if gone:
+            self._changed()
+        return gone
+
+    def run(self) -> None:
+        """Start the monitors, follow home, and collect openings for the chime."""
+        if not WSPR_ON:
+            applog.set_status("wspr", "off", "WSPR_TARGETS_ENABLED is off")
+            return
+        metros.start()                                   # city names for the bubbles
+        self.configure()
+        while True:
+            h = home.now()
+            key = (h["lat"], h["lon"])
+            if key != self.home_key:
+                self.home_key = key
+                self.configure()
+            for o in wspr_monitor.pop_openings():
+                self.openings_seq += 1
+                self.openings = (self.openings + [{**o, "seq": self.openings_seq, "t": time.time()}])[-20:]
+            time.sleep(2)
+
+    def snapshot(self) -> dict:
+        with self.lock:
+            targets = [dict(t) for t in self.list]
+        fields = sorted({t["field"] for t in targets})
+        return {"version": self.version, "targets": targets,
+                "wspr": wspr_monitor.get_status() if WSPR_ON else {},
+                "ft8": ft8_monitor.get_status(fields) if (FT8_ON and fields) else {},
+                "metros": {f: metros.top_metros_in_field(f) for f in fields},
+                "wspr_on": WSPR_ON, "ft8_on": FT8_ON,
+                "scope": {"wspr": wspr_monitor.home_scope_label(), "ft8": ft8_monitor.home_scope_label()},
+                "band_labels": {str(b): wspr_monitor.band_label(b) for b in wspr_monitor._BANDS}}
+
+    def find(self, tid):
+        with self.lock:
+            return next((dict(t) for t in self.list if t["id"] == tid), None)
+
+
+prefs = Prefs()
+targets = Targets()
+
+
 def status_tags() -> dict:
     st = applog.get_status()
     out = {}
@@ -413,6 +578,9 @@ def public_config() -> dict:
         "boundaries": {"enabled": bool(c("BOUNDARY_ENABLE", True)), "min_zoom": c("BOUNDARY_MIN_ZOOM", 2.5),
                        "color": c("BOUNDARY_COLOR", "#8FA3B8"), "alpha": c("BOUNDARY_ALPHA", 0.55)},
         "pyramid": pyramid,
+        "targets": {"wspr_on": WSPR_ON, "ft8_on": FT8_ON, "modes": wspr_monitor.modes(), "sounds": SOUNDS,
+                    "radius": c("TARGET_DOT_RADIUS", 7), "ping_s": c("WSPR_ALERT_HIGHLIGHT_SECONDS", 60),
+                    "volume": c("ALERT_VOLUME", 0.8), "sound_on": bool(c("ALERT_SOUND_ENABLED", True))},
         "kiosk": KIOSK,                 # the FieldLab kiosk: browsers get the TV view panel
     }
 
@@ -459,7 +627,9 @@ def api_state():
                          "space_weather": space_wx(), "status": status_tags(),
                          "tle_version": worker.tle_version,
                          "sats": {"shown": choice.shown, "version": choice.version},
-                         "qso_version": qsos_worker.version, "now": time.time()},
+                         "qso_version": qsos_worker.version,
+                         "targets": {"version": targets.version, "openings_seq": targets.openings_seq},
+                         "prefs": prefs.get(), "now": time.time()},
                         headers=NO_STORE)
 
 
@@ -494,6 +664,70 @@ def api_sats():
 def api_qsos():
     """The QSOs piMap draws: home, DX (from the grid), callsign, bubble lines, time."""
     return JSONResponse(qsos_worker.snapshot(), headers=NO_STORE)
+
+
+@app.get("/api/targets")
+def api_targets():
+    """Target dots with their WSPR (and FT8) band status, and the cities in each field."""
+    return JSONResponse(targets.snapshot(), headers=NO_STORE)
+
+
+@app.post("/api/targets")
+async def edit_targets(request: Request):
+    """{op: "add", lat, lon} | {op: "move", id, lat, lon} | {op: "remove", id}"""
+    try:
+        b = await request.json()
+        op = b["op"]
+        if op == "add":
+            t = targets.add(float(b["lat"]), float(b["lon"]))
+            return {"ok": True, "target": t, "version": targets.version}
+        if op == "move":
+            ok = targets.move(str(b["id"]), float(b["lat"]), float(b["lon"]))
+        elif op == "remove":
+            ok = targets.remove(str(b["id"]))
+        else:
+            raise ValueError(op)
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return JSONResponse({"ok": False, "error": "expected {op: add|move|remove, ...}"}, status_code=400)
+    return {"ok": ok, "version": targets.version}
+
+
+@app.get("/api/target-detail")
+def target_detail(id: str, band: int, source: str = "wspr"):
+    """The stations behind one band cell of a dot's bubble (piMap's drill-down).
+    WSPR is fetched from wspr.live on first ask (poll until state is "ok"); FT8 is local."""
+    t = targets.find(id)
+    if t is None:
+        return JSONResponse({"state": "error", "error": "no such target"}, status_code=404)
+    base = {"label": t["label"], "field": t["field"], "band": band,
+            "band_label": wspr_monitor.band_label(band), "source": source.upper()}
+    if source == "ft8":
+        if not FT8_ON:
+            return {**base, "state": "error", "error": "FT8 monitor is off", "hearing": [], "heard_by": []}
+        return {**base, "state": "ok", **ft8_monitor.get_detail(t["field"], band)}
+    d = wspr_monitor.get_detail()
+    if d is None or d.get("key") != (id, band):
+        wspr_monitor.request_detail(id, t["field"], band, t["label"])
+        d = wspr_monitor.get_detail() or {}
+    d = {k: v for k, v in d.items() if k not in ("key", "spots")}
+    return JSONResponse({**base, **d, "source": "WSPR"}, headers=NO_STORE)
+
+
+@app.get("/api/openings")
+def api_openings(after: int = 0):
+    """Paths that just opened (a dot turning green), for every screen's chime."""
+    return JSONResponse({"seq": targets.openings_seq,
+                         "openings": [o for o in targets.openings if o["seq"] > after]}, headers=NO_STORE)
+
+
+@app.post("/api/prefs")
+async def set_prefs(request: Request):
+    """{spot_mode: "FT8"|"CW"|"SSB"} and/or {alert_sound: name}: shared, like piMap's ui_prefs."""
+    try:
+        b = await request.json()
+    except ValueError:
+        return JSONResponse({"ok": False}, status_code=400)
+    return {"ok": True, **prefs.set(b.get("spot_mode"), b.get("alert_sound"))}
 
 
 @app.get("/api/sat/{norad}")
@@ -616,6 +850,7 @@ def _start():
     threading.Thread(target=worker.run, name="refresh", daemon=True).start()
     threading.Thread(target=passes.run, name="passes", daemon=True).start()
     threading.Thread(target=qsos_worker.run, name="qrz", daemon=True).start()
+    threading.Thread(target=targets.run, name="targets", daemon=True).start()
     sat_radio.preload_async()             # SatNOGS transmitters for the bubbles
 
 

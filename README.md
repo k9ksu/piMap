@@ -112,7 +112,15 @@ column that sets what the TV draws). Touch screens get edge tabs instead of hove
 change detection, session mode, adaptive polling, the N3FJP trigger), great-circle
 paths and dots in `QSO_COLOR` drawn by the browser, piMap's QSO bubble on hover/click,
 and a "QSO paths" line in the left menu (and the TV column).
-Coming: target dots, propagation, sound and spot mode (phase 3).
+**Target dots** (phase 3), as piMap: double-click the map to drop one, drag to move,
+middle-click or Delete to remove. Each dot's path from home is judged by piMap's
+`wspr_monitor` (wspr.live, WSPR_HOME_RADIUS_KM round home) and, if on, `ft8_monitor`
+(PSKReporter); the dot takes whichever is more open, and pings and chimes (piMap's
+five sounds, synthesized in the browser) when it turns green. Its bubble has the
+field's biggest cities and the FT8 | WSPR band table; click a cell for the stations
+heard both ways. Dots, spot mode and alert sound are shared by every screen
+(`data/targets.json`, `data/prefs.json`; a shack piMap's `targets.json` and
+`ui_prefs.json` are picked up the first time); chime on/off and volume are per screen.
 
 **On the shack Pi** (switches HDMI-2 from the pygame map; `./install2.sh --back` undoes it):
 

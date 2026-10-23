@@ -111,3 +111,30 @@ html.tv #bubble { display: none; }
 #setlist .row.head:hover { background: none; }
 #setlist.two .row .col { width: 1.05em; text-align: center; flex: none; }
 #setlist .tvbox { accent-color: #d08a3a; }
+
+/* settings: spot mode, sound, volume, test */
+#setextra { margin-top: .6em; border-top: 1px solid #3b4d62; padding-top: .5em; }
+#setextra .row.pick { flex-direction: column; align-items: stretch; gap: .25em; cursor: default; }
+#setextra .row.pick:hover { background: none; }
+#setextra select, #setextra .test { font: inherit; background: #17202b; color: var(--text);
+  border: 1px solid #3b4d62; border-radius: 6px; padding: .2em .4em; }
+#setextra input[type=range] { width: 100%; accent-color: #5a8fd0; }
+#setextra .test { margin: .3em .2em; cursor: pointer; }
+
+/* target bubble: piMap's band table, clickable cells, and the drill-down */
+#bubble.interactive { pointer-events: auto; }
+#bubble .metro { color: #aac3dc; }
+#bubble table { border-collapse: collapse; margin-top: .3em; }
+#bubble table.bands th { color: #82878f; font-weight: 400; text-align: left; padding: 0 .6em .15em 0;
+  border-bottom: 1px solid #3a404c; }
+#bubble table.bands th.ft8 { color: #96e1a5; } #bubble table.bands th.wspr { color: #96c3eb; }
+#bubble td { padding: .08em .6em .08em 0; color: #b9c3cd; }
+#bubble td.band { color: #e1e6ee; }
+#bubble td.cell { cursor: pointer; border-radius: 4px; }
+#bubble td.cell:hover { background: #222832; }
+#bubble .sdot { display: inline-block; width: .62em; height: .62em; border-radius: 50%; margin-right: .5em; }
+#bubble .hint { color: #787a80; margin-top: .35em; }
+#bubble .sec { color: #c9d4df; margin-top: .35em; }
+#bubble table.spots td:first-child { color: #e8e8e8; }
+#bubble .back { font: inherit; background: #17202b; color: #c9d4df; border: 1px solid #3b4d62; border-radius: 5px;
+  padding: 0 .4em; cursor: pointer; }
