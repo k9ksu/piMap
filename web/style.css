@@ -64,3 +64,35 @@ html:not(.tv) #over.dragging { cursor: grabbing; }
   background: #17202b; color: #e6edf3; font: 600 17px/1 system-ui, sans-serif; cursor: pointer; }
 #tvview button.wide { padding: 0 10px; font-size: 13px; }
 #tvview button:disabled { opacity: .35; cursor: default; }
+
+/* ---- piMap's edge flyouts: settings (left), satellites (right). Never on the TV. ---- */
+.flyout { position: absolute; top: calc(var(--H) * .1); bottom: calc(var(--H) * .3); width: calc(var(--H) * 2.6);
+  display: flex; flex-direction: column; box-sizing: border-box; padding: calc(var(--H) * .09);
+  background: rgba(10, 12, 16, .93); border: 2px solid #3b4d62; border-radius: 10px;
+  font: calc(var(--H) * .105)/1.35 var(--mono); color: var(--text); z-index: 5;
+  transition: transform .22s ease-out; user-select: none; -webkit-user-select: none; }
+.flyout.left { left: 0; transform: translateX(-104%); }
+.flyout.right { right: 0; transform: translateX(104%); }
+.flyout.open { transform: none; }
+.flyout h2 { margin: 0 0 .3em; font: inherit; font-weight: 700; letter-spacing: .06em; color: #c9d4df;
+  border-bottom: 1px solid #3b4d62; padding-bottom: .4em; }
+.flyout .sub { margin: 0 0 .5em; color: var(--dim); font-size: .9em; }
+.flyout .hint { margin: .8em 0 0; color: var(--off); font-size: .85em; }
+.flyout .row { display: flex; align-items: center; gap: .55em; padding: .32em .2em; border-radius: 6px; cursor: pointer; }
+.flyout .row:hover { background: rgba(70, 98, 128, .25); }
+.flyout input[type=checkbox] { width: 1.05em; height: 1.05em; margin: 0; accent-color: #5a8fd0; flex: none; }
+#satlist { overflow-y: auto; flex: 1; min-height: 0; overscroll-behavior: contain; }
+#satlist .chip { width: .8em; height: .8em; border-radius: 50%; flex: none; }
+#satlist .chip.iss { box-shadow: 0 0 0 1px #c9d4df; }
+#satlist .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#satlist .when { flex: none; color: var(--dim); font-variant-numeric: tabular-nums; min-width: 4.6em; text-align: right; }
+#satlist .empty { color: var(--dim); }
+html.tv .flyout, html.tv .edgetab { display: none; }
+
+/* touch screens can't hover an edge: small tabs instead */
+.edgetab { display: none; position: absolute; top: 45%; width: 30px; height: 56px; z-index: 6;
+  border: 1px solid #3b4d62; background: rgba(10, 12, 16, .85); color: #c9d4df; font-size: 16px; padding: 0; }
+.edgetab.left { left: 0; border-radius: 0 8px 8px 0; }
+.edgetab.right { right: 0; border-radius: 8px 0 0 8px; }
+@media (pointer: coarse) { html:not(.tv) .edgetab { display: block; } }
+@media (max-width: 700px) { .flyout { width: min(86vw, 360px); font-size: 14px; } }

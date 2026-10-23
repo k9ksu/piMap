@@ -84,6 +84,14 @@ class Api(unittest.TestCase):
         lon, lat = lines[0][0], lines[0][1]
         self.assertTrue(-180 <= lon <= 180 and -90 <= lat <= 90)
 
+    def test_sats_choice(self):
+        d = self.c.get("/api/sats").json()
+        self.assertIn("shown", d)
+        self.assertEqual(self.c.post("/api/sats", json={"norad": 27607, "on": True}).json()["shown"][-1], 27607)
+        self.assertNotIn(27607, self.c.post("/api/sats", json={"norad": 27607, "on": False}).json()["shown"])
+        self.assertEqual(self.c.post("/api/sats", json={"norad": "x"}).status_code, 400)
+        self.assertEqual(self.c.get("/api/state").json()["sats"]["shown"], server.choice.shown)
+
     def test_kiosk_contract(self):
         st = self.c.get("/_fieldlab/status").json()
         self.assertIn(st["state"], ("ready", "degraded", "error"))

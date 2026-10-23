@@ -67,6 +67,13 @@ export class Sats {
     this.recs = new Map();                   // norad -> {satrec, name, color, track, trackAt}
     this.show = new Set(conf.show || [ISS]);
     this.footprints = conf.footprint !== false;
+    this.tracks = true;
+  }
+
+  /** The colour a satellite is drawn in (piMap's), for the satellite panel's chips. */
+  colorOf(norad) {
+    const r = this.recs.get(norad);
+    return r ? r.color : "#777";
   }
 
   setTles(list) {
@@ -105,7 +112,7 @@ export class Sats {
     ctx.lineJoin = "round"; ctx.lineCap = "round";
     for (const [n, r] of shown) {
       ctx.strokeStyle = r.color; ctx.lineWidth = 3 * u;
-      for (const seg of this._track(r, now)) {
+      for (const seg of this.tracks ? this._track(r, now) : []) {
         ctx.beginPath();
         seg.forEach((p, i) => (i ? ctx.lineTo(X(p.lon), Y(p.lat)) : ctx.moveTo(X(p.lon), Y(p.lat))));
         ctx.stroke();

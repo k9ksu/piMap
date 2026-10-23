@@ -196,6 +196,67 @@ class Worker:
 worker = Worker()
 
 
+# ---- satellites: which are shown, and when each next passes over home -----------------
+SATS_FILE = DATA_DIR / "sats_shown.json"
+ISS = 25544
+
+
+class SatChoice:
+    """The satellites drawn on the map: chosen from the right-edge panel (any browser),
+    kept in data/sats_shown.json, so the TV and the shack screen show the same set."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        try:
+            self.shown = [int(n) for n in json.loads(SATS_FILE.read_text())["shown"]]
+        except (OSError, ValueError, KeyError, TypeError):
+            self.shown = [int(n) for n in get(cfg, "SATS_SHOWN", [ISS])]
+        self.version = 1
+
+    def set(self, norad: int, on: bool) -> list[int]:
+        with self.lock:
+            s = [n for n in self.shown if n != norad]
+            if on:
+                s.append(norad)
+            self.shown, self.version = s, self.version + 1
+            try:
+                DATA_DIR.mkdir(parents=True, exist_ok=True)
+                tmp = SATS_FILE.with_suffix(".tmp")
+                tmp.write_text(json.dumps({"shown": s}))
+                tmp.replace(SATS_FILE)
+            except OSError as e:
+                log.warning("can't save the satellite choice: %s", e)
+            return list(s)
+
+
+choice = SatChoice()
+
+
+class Passes:
+    """Next pass over home for every satellite (piMap's sat_tracker, every 2 minutes,
+    for wherever home is now: it follows the trailer's GPS)."""
+
+    def __init__(self):
+        self.at = 0.0
+        self.home: tuple[float, float] | None = None
+
+    def run(self) -> None:
+        while True:
+            h = home.now()
+            try:
+                sat_tracker._compute_schedule(h["lat"], h["lon"])
+                self.at, self.home = time.time(), (h["lat"], h["lon"])
+            except Exception as e:
+                log.warning("pass schedule failed: %s", e)
+            time.sleep(120)
+
+    def get(self) -> dict:
+        return sat_tracker.get_schedule()[1]
+
+
+passes = Passes()
+
+
 def status_tags() -> dict:
     st = applog.get_status()
     return {k: {"state": st[k][0], "detail": st[k][1]} if k in st else {"state": "off", "detail": ""}
@@ -278,7 +339,8 @@ def api_config():
 def api_state():
     return JSONResponse({"home": home.now(), "tv": {"zoom": tv["zoom"], "changed": tv["changed"]},
                          "space_weather": space_wx(), "status": status_tags(),
-                         "tle_version": worker.tle_version, "now": time.time()},
+                         "tle_version": worker.tle_version,
+                         "sats": {"shown": choice.shown, "version": choice.version}, "now": time.time()},
                         headers=NO_STORE)
 
 
@@ -295,6 +357,29 @@ def api_tles():
 def api_boundaries():
     return Response(boundaries_json(), media_type="application/json",
                     headers={"Cache-Control": "no-cache"})
+
+
+@app.get("/api/sats")
+def api_sats():
+    """Every satellite with its next pass over home, ISS first, then soonest pass."""
+    tles = sat_tracker.all_tles()
+    nxt = passes.get()
+    rows = [{"norad": n, "name": t[0], "next_pass": nxt.get(n)} for n, t in tles.items()]
+    rows.sort(key=lambda r: (r["norad"] != ISS, r["next_pass"] is None, r["next_pass"] or 0, r["name"]))
+    return JSONResponse({"sats": rows, "shown": choice.shown, "passes_at": passes.at,
+                         "min_elevation": float(get(cfg, "PASS_MIN_ELEVATION", 10.0))},
+                        headers=NO_STORE)
+
+
+@app.post("/api/sats")
+async def set_sat(request: Request):
+    """{norad: n, on: true|false}: show or hide a satellite on the map."""
+    try:
+        body = await request.json()
+        norad, on = int(body["norad"]), bool(body["on"])
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return JSONResponse({"ok": False, "error": "expected {norad: n, on: bool}"}, status_code=400)
+    return {"ok": True, "shown": choice.set(norad, on)}
 
 
 @app.get("/api/tv-view")
@@ -368,6 +453,7 @@ app.mount("/fonts", StaticFiles(directory=Path(ROOT) / "fonts"), name="fonts")
 def _start():
     start_mqtt()
     threading.Thread(target=worker.run, name="refresh", daemon=True).start()
+    threading.Thread(target=passes.run, name="passes", daemon=True).start()
 
 
 def main() -> None:

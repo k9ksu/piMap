@@ -33,6 +33,19 @@
   <canvas id="lines"></canvas>
   <canvas id="over"></canvas>
   <div id="note">Loading the map…</div>
+  <aside id="setpanel" class="flyout left" aria-label="Settings">
+    <h2>SETTINGS</h2>
+    <div id="setlist"></div>
+    <p class="hint">Sound, spot mode and target dots come with piMap 2.0's next phase.</p>
+    <p class="hint">Hover the left edge to open</p>
+  </aside>
+  <aside id="satpanel" class="flyout right" aria-label="Satellites">
+    <h2>SATELLITES</h2>
+    <p class="sub" id="satsub">next pass over home</p>
+    <div id="satlist"></div>
+  </aside>
+  <button id="settab" class="edgetab left" aria-label="Settings">⚙</button>
+  <button id="sattab" class="edgetab right" aria-label="Satellites">🛰</button>
   <div id="tvview" hidden title="What the TV shows: this zoom, centred on home (the trailer's GPS position)">
     <span class="label">TV view</span>
     <button id="tvout" aria-label="TV view: zoom out">−</button>

@@ -102,10 +102,12 @@ piMap 2.0 keeps piMap's Python for the data (QRZ, TLEs, space weather, the same
 - Same look: callsign, clock (with DST via `timezonefinder`), space weather, band
   conditions, status tags, piMap's `MAP_BRIGHTNESS` and night shading, black ISS track.
 
-Phase 1 is the map, grey line, header, satellites (ISS, plus any `SATS_SHOWN = [norad, ...]`
-in `config.py`; `SAT_FOOTPRINT = False` hides the visibility circles) and mouse zoom/pan.
-Coming: QSO paths (phase 2); target dots, propagation, the settings and satellite
-flyouts (phase 3).
+Phase 1 is the map, grey line, borders, header, satellites and mouse zoom/pan, with
+piMap's edge flyouts: **right edge** the satellite list (ISS first, then by next pass
+over home, tick to show; the choice is saved on the server so every screen shows the
+same set, starting from `SATS_SHOWN`), **left edge** display settings (night shading,
+borders, tracks, footprints; per browser). Touch screens get edge tabs instead of hover.
+Coming: QSO paths (phase 2); target dots, propagation, sound and spot mode (phase 3).
 
 **On the shack Pi** (switches HDMI-2 from the pygame map; `./install2.sh --back` undoes it):
 

@@ -16,6 +16,7 @@ import { Tiles } from "./tiles.js";
 import { Night, subsolar, sunElevation } from "./sky.js";
 import { Sats } from "./sats.js";
 import { Borders } from "./borders.js";
+import { setupPanels, loadSettings, DEFAULT_SETTINGS } from "./panels.js";
 
 const TV = document.documentElement.classList.contains("tv");
 // ?debug=1&off=night,borders,sats,tiles,bright: switch layers off to find what's costly
@@ -28,7 +29,8 @@ const bctx = base.getContext("2d", { alpha: false }), octx = over.getContext("2d
 let conf = null, view = null, tiles = null, night = null, sats = null, borders = null;
 let state = null, home = null, dpr = 1, u = 1;
 let baseDirty = true, overAt = 0, tleVersion = -1, tvSeen = null;
-let speed = 0, speedAt = 0, changedAt = 0;          // fastest satellite, device px/s (checked once a second)
+let speed = 0, speedAt = 0, changedAt = 0;
+let settings = { ...DEFAULT_SETTINGS }, satsVersion = -1, clockSkew = 0;          // fastest satellite, device px/s (checked once a second)
 
 // ---- start --------------------------------------------------------------------------
 async function getJSON(url, opts) {
@@ -63,7 +65,13 @@ async function start() {
 
   resize();
   window.addEventListener("resize", resize);
-  if (!TV) wireInput();
+  if (!TV) {
+    wireInput();
+    settings = loadSettings();
+    applySettings(settings);
+    setupPanels({ sats, settings, onSettings: applySettings, onToggleSat: toggleSat,
+                  serverNow: () => (Date.now() + clockSkew) / 1000 });
+  }
   if (!TV && conf.kiosk) wireTvPanel();
   await poll();
   setInterval(poll, 5000);
@@ -87,6 +95,10 @@ function resize() {
 // ---- server state: home, TV view, space weather, status, TLEs -------------------------
 async function poll() {
   try { state = await getJSON("api/state"); } catch (e) { return; }
+  clockSkew = state.now * 1000 - Date.now();
+  if (state.sats && state.sats.version !== satsVersion) {
+    satsVersion = state.sats.version; sats.show = new Set(state.sats.shown); overAt = 0;
+  }
   const h = state.home, moved = !home || home.lat !== h.lat || home.lon !== h.lon;
   home = h;
   if (state.tle_version !== tleVersion) {
@@ -176,7 +188,7 @@ function drawBase() {
   bctx.imageSmoothingEnabled = true; bctx.imageSmoothingQuality = "high";
   if (!OFF.has("tiles")) tiles.draw(bctx, view, dpr);
   if (!OFF.has("bright")) brighten(bctx, conf.map.brightness);
-  if (night && !OFF.has("night")) night.draw(bctx, view, dpr);
+  if (night && settings.night && !OFF.has("night")) night.draw(bctx, view, dpr);
   $("note").hidden = true;
 }
 
@@ -325,6 +337,25 @@ function wireTvPanel() {
   $("tvin").addEventListener("click", () => send(state.tv.zoom * step()));
   $("tvout").addEventListener("click", () => send(state.tv.zoom / step()));
   $("tvmine").addEventListener("click", () => send(view.zoom));
+}
+
+// ---- the edge panels' effects ------------------------------------------------------------
+function applySettings(st) {
+  borders.conf = { ...(conf.boundaries || {}), enabled: !!(conf.boundaries && conf.boundaries.enabled) && st.borders };
+  borders.snap = null;                         // redraw (or clear) the borders layer
+  sats.tracks = st.tracks;
+  sats.footprints = st.footprints && conf.sats.footprint !== false;
+  baseDirty = true; overAt = 0;
+}
+
+async function toggleSat(norad, on) {
+  try {
+    const r = await getJSON("api/sats", { method: "POST", headers: { "content-type": "application/json" },
+                                          body: JSON.stringify({ norad, on }) });
+    if (!r.ok) return false;
+    sats.show = new Set(r.shown); overAt = 0;
+    return true;
+  } catch (e) { return false; }
 }
 
 function sleep(ms) { return new Promise((ok) => setTimeout(ok, ms)); }

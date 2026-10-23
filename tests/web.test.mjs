@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { subsolar, sunElevation } from "../web/sky.js";
 import { footprint, splitDateline } from "../web/sats.js";
 import { View } from "../web/view.js";
+import { fmtPass } from "../web/panels.js";
 
 test("sun: declination through the year", () => {
   assert.ok(Math.abs(subsolar(new Date("2026-03-20T14:46:00Z")).lat) < 0.3);         // equinox
@@ -59,4 +60,12 @@ test("view: wheel zoom keeps the point under the mouse", () => {
   v.zoomAt(1.15, 400, 300);
   for (let i = 0; i < 120; i++) v.step(1 / 60);
   assert.ok(Math.abs(v.x(lon) - 400) < 0.5 && Math.abs(v.y(lat) - 300) < 0.5);
+});
+
+test("panel: piMap's next-pass labels", () => {
+  assert.equal(fmtPass(null, 0), "--");
+  assert.equal(fmtPass(100, 200), "now");
+  assert.equal(fmtPass(1000 + 30, 1000), "1m");
+  assert.equal(fmtPass(1000 + 23 * 60 + 5, 1000), "23m");
+  assert.equal(fmtPass(1000 + 76 * 60, 1000), "1h 16m");
 });
