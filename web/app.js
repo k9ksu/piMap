@@ -34,6 +34,9 @@ const chime = new Chime();
 let openingsSeen = -1, targetsAt = 0;
 let detail = null;                   // the bubble's drill-down: {id, band, source, data}
 let bubbleHover = false, shownKey = null;
+// A hovered bubble stays this long after the mouse leaves its dot, so it can be reached.
+const HOVER_GRACE_MS = 900;
+let lastHover = null, graceTimer = 0;
 let state = null, home = null, dpr = 1, u = 1;
 let baseDirty = true, overAt = 0, tleVersion = -1, tvSeen = null;
 let speed = 0, speedAt = 0, changedAt = 0;
@@ -92,7 +95,7 @@ async function start() {
                   } : null });
   }
   if (!TV && conf.kiosk) wireTvPanel();
-  if (QS.get("debug")) window.__pimap = { view, sats, tiles, borders, targets, chime, get settings() { return settings; } };   // for measuring and tests
+  if (QS.get("debug")) window.__pimap = { view, sats, tiles, borders, targets, chime, get settings() { return settings; }, get pinned() { return pinned; }, get lastHover() { return lastHover; }, get pointer() { return pointer; } };   // for measuring and tests
   await poll();
   setInterval(poll, 5000);
   setInterval(clock, 250);
@@ -331,9 +334,18 @@ function bubble() {
   const el = $("bubble");
   let m = pinned !== null ? findMarker(pinned) : null;
   if (pinned !== null && !m) pinned = null;                   // its dot went away (unchecked, aged out)
-  if (!m && pointer) m = hitAny(pointer.x * dpr, pointer.y * dpr);
+  const now = performance.now();
+  if (!m && pointer) {
+    m = hitAny(pointer.x * dpr, pointer.y * dpr);
+    if (m) lastHover = { key: m.key, until: now + HOVER_GRACE_MS };   // keeps it while the mouse crosses to it
+  }
   if (!m && bubbleHover && shownKey) m = findMarker(shownKey); // piMap: the cursor is inside the bubble: keep it
-  if (!m) { el.hidden = true; shownKey = null; bubbleHover = false; if (detail) detail = null; return; }
+  if (!m && lastHover && now < lastHover.until) {
+    m = findMarker(lastHover.key);
+    clearTimeout(graceTimer);
+    graceTimer = setTimeout(() => { overAt = 0; }, lastHover.until - now + 20);   // redraw when the grace ends
+  }
+  if (!m) { el.hidden = true; shownKey = null; bubbleHover = false; lastHover = null; if (detail) detail = null; return; }
   if (detail && (m.kind !== "target" || detail.id !== m.id)) detail = null;
   shownKey = m.key;
   let key, fill;
@@ -399,7 +411,13 @@ function targetBubble(m) {
   const key = `${m.key}|${JSON.stringify(rows)}|${JSON.stringify(metrosList)}|${d.ft8_on}`;
   const fill = () => {
     const title = document.createElement("div"); title.className = "title";
-    title.textContent = `${t.label}  [${t.field}]`; el.appendChild(title);
+    title.textContent = `${t.label}  [${t.field}]`;
+    if (!TV) {                                                     // for mice with no middle button, and touch
+      const rm = document.createElement("button"); rm.className = "remove"; rm.textContent = "✕ remove";
+      rm.dataset.remove = "1"; rm.title = "Remove this target dot";
+      title.appendChild(rm);
+    }
+    el.appendChild(title);
     const mt = metrosList == null ? ["cities loading..."] : metrosList.length ? metrosList.map((c) => `* ${c}`) : ["no major metros"];
     for (const c of mt) { const x = document.createElement("div"); x.className = "metro"; x.textContent = c; el.appendChild(x); }
     const tb = document.createElement("table"); tb.className = "bands";
@@ -421,7 +439,7 @@ function targetBubble(m) {
     }
     el.appendChild(tb);
     const hint = document.createElement("div"); hint.className = "hint";
-    hint.textContent = TV ? "" : "click a cell for stations | middle-click removes";
+    hint.textContent = TV ? "" : "click a cell for stations";
     el.appendChild(hint);
   };
   return { key, fill };
@@ -487,6 +505,12 @@ function wireBubble() {
     const m = shownKey && findMarker(shownKey);
     if (!m || m.kind !== "target") return;
     if (e.target.closest("[data-back]")) { detail = null; overAt = 0; return; }
+    if (e.target.closest("[data-remove]")) {
+      editTarget({ op: "remove", id: m.id });
+      if (pinned === m.key) pinned = null;
+      bubbleHover = false; lastHover = null; shownKey = null; el.hidden = true; overAt = 0;
+      return;
+    }
     const cell = e.target.closest("td.cell");
     if (cell) { pinned = m.key; openDetail(m.id, Number(cell.dataset.band), cell.dataset.source); overAt = 0; }
   });
@@ -564,6 +588,7 @@ function wireInput() {
       // piMap: click a dot to pin/unpin its bubble; click empty map to dismiss
       const p = at(e), m = hitAny(p.x * dpr, p.y * dpr);
       pinned = m ? (pinned === m.key ? null : m.key) : null;
+      if (!m) lastHover = null;                                   // a click on empty map closes it at once
       if (e.pointerType !== "mouse") pointer = m ? p : null;      // touch: a tap shows it
       overAt = 0;
     }
@@ -576,7 +601,7 @@ function wireInput() {
     if (hitAny(p.x * dpr, p.y * dpr)) return;
     const lon = view.lonAt(p.x), lat = view.latAt(p.y);
     if (lon < -180 || lon > 180 || lat < -90 || lat > 90) return;
-    editTarget({ op: "add", lat, lon }).then((r) => { if (r.ok && r.target) pinned = `target:${r.target.id}`; });
+    editTarget({ op: "add", lat, lon });               // not pinned: its bubble shows on hover, like any dot
   });
   document.addEventListener("keydown", (e) => {        // piMap: Delete/Backspace over a target dot removes it
     if (e.key !== "Delete" && e.key !== "Backspace") return;

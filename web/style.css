@@ -136,5 +136,8 @@ html.tv #bubble { display: none; }
 #bubble .hint { color: #787a80; margin-top: .35em; }
 #bubble .sec { color: #c9d4df; margin-top: .35em; }
 #bubble table.spots td:first-child { color: #e8e8e8; }
-#bubble .back { font: inherit; background: #17202b; color: #c9d4df; border: 1px solid #3b4d62; border-radius: 5px;
+#bubble .remove { font: inherit; font-weight: 400; font-size: .85em; margin-left: 1.2em; float: right;
+  background: #2a1717; color: #f0b4b4; border: 1px solid #6a3434; border-radius: 5px; padding: 0 .4em; cursor: pointer; }
+#bubble .remove:hover { background: #4a1f1f; color: #fff; }
+#bubble .back {font: inherit; background: #17202b; color: #c9d4df; border: 1px solid #3b4d62; border-radius: 5px;
   padding: 0 .4em; cursor: pointer; }
