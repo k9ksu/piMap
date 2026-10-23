@@ -36,6 +36,7 @@ let detail = null;                   // the bubble's drill-down: {id, band, sour
 let bubbleHover = false, shownKey = null;
 // A hovered bubble stays this long after the mouse leaves its dot, so it can be reached.
 const HOVER_GRACE_MS = 900;
+const LEAVE_GRACE_MS = 250;          // ...but leaving the bubble itself closes it almost at once
 let lastHover = null, graceTimer = 0;
 let state = null, home = null, dpr = 1, u = 1;
 let baseDirty = true, overAt = 0, tleVersion = -1, tvSeen = null;
@@ -345,7 +346,12 @@ function bubble() {
     clearTimeout(graceTimer);
     graceTimer = setTimeout(() => { overAt = 0; }, lastHover.until - now + 20);   // redraw when the grace ends
   }
-  if (!m) { el.hidden = true; shownKey = null; bubbleHover = false; lastHover = null; if (detail) detail = null; return; }
+  if (!m) {
+    el.hidden = true; shownKey = null; bubbleHover = false; lastHover = null; detail = null;
+    el.style.minWidth = el.style.minHeight = "";
+    return;
+  }
+  if (!detail) el.style.minWidth = el.style.minHeight = "";
   if (detail && (m.kind !== "target" || detail.id !== m.id)) detail = null;
   shownKey = m.key;
   let key, fill;
@@ -500,11 +506,15 @@ async function openDetail(id, band, source) {
 function wireBubble() {
   const el = $("bubble");
   el.addEventListener("pointerenter", () => { if (el.classList.contains("interactive")) bubbleHover = true; });
-  el.addEventListener("pointerleave", () => { bubbleHover = false; overAt = 0; });
+  el.addEventListener("pointerleave", () => {            // out of the bubble: gone almost at once
+    bubbleHover = false;
+    if (shownKey) lastHover = { key: shownKey, until: performance.now() + LEAVE_GRACE_MS };
+    overAt = 0;
+  });
   el.addEventListener("click", (e) => {
     const m = shownKey && findMarker(shownKey);
     if (!m || m.kind !== "target") return;
-    if (e.target.closest("[data-back]")) { detail = null; overAt = 0; return; }
+    if (e.target.closest("[data-back]")) { detail = null; el.style.minWidth = el.style.minHeight = ""; overAt = 0; return; }
     if (e.target.closest("[data-remove]")) {
       editTarget({ op: "remove", id: m.id });
       if (pinned === m.key) pinned = null;
@@ -512,7 +522,12 @@ function wireBubble() {
       return;
     }
     const cell = e.target.closest("td.cell");
-    if (cell) { pinned = m.key; openDetail(m.id, Number(cell.dataset.band), cell.dataset.source); overAt = 0; }
+    if (cell) {
+      // Not pinned: it closes when the mouse leaves. Hold the bubble's size so it doesn't
+      // shrink out from under the mouse while the spots load.
+      el.style.minWidth = `${el.offsetWidth}px`; el.style.minHeight = `${el.offsetHeight}px`;
+      openDetail(m.id, Number(cell.dataset.band), cell.dataset.source); overAt = 0;
+    }
   });
 }
 
