@@ -101,6 +101,8 @@ html.tv .flyout, html.tv .edgetab { display: none; }
 #bubble { position: absolute; z-index: 4; pointer-events: none; padding: calc(var(--H) * .06) calc(var(--H) * .075);
   background: rgba(10, 10, 14, .93); border: 2px solid #d2d2d2; border-radius: 6px;
   font: calc(var(--H) * .105)/1.35 var(--mono); color: #d7e1eb; white-space: nowrap; }
+#bubble { opacity: 1; transition: opacity .18s ease-out; }
+#bubble.fading { opacity: 0; pointer-events: none !important; }
 #bubble.pinned { border-width: 3px; }
 #bubble .title { color: #fff; font-weight: 700; margin-bottom: .15em; }
 #bubble .live { color: var(--dim); margin-top: .2em; }

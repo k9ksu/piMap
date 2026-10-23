@@ -37,6 +37,8 @@ let bubbleHover = false, shownKey = null;
 // A hovered bubble stays this long after the mouse leaves its dot, so it can be reached.
 const HOVER_GRACE_MS = 900;
 const LEAVE_GRACE_MS = 250;          // ...but leaving the bubble itself closes it almost at once
+const FADE_MS = 180;                 // the fade-out (matches #bubble's CSS transition)
+let fadeTimer = 0;
 let lastHover = null, graceTimer = 0;
 let state = null, home = null, dpr = 1, u = 1;
 let baseDirty = true, overAt = 0, tleVersion = -1, tvSeen = null;
@@ -331,6 +333,19 @@ function findMarker(key) {
   return qsos.markers.find((k) => k.key === key) || null;
 }
 
+/** Fade the bubble out (the CSS transition), then hide it. Showing it again cancels this. */
+function fadeBubble(el) {
+  if (el.hidden || el.classList.contains("fading")) return;
+  el.classList.add("fading");
+  clearTimeout(fadeTimer);
+  fadeTimer = setTimeout(() => {
+    el.classList.remove("fading");
+    el.hidden = true;
+    el.dataset.key = "";                                          // refilled fresh next time
+    el.style.minWidth = el.style.minHeight = "";
+  }, FADE_MS);
+}
+
 function bubble() {
   const el = $("bubble");
   let m = pinned !== null ? findMarker(pinned) : null;
@@ -347,8 +362,8 @@ function bubble() {
     graceTimer = setTimeout(() => { overAt = 0; }, lastHover.until - now + 20);   // redraw when the grace ends
   }
   if (!m) {
-    el.hidden = true; shownKey = null; bubbleHover = false; lastHover = null; detail = null;
-    el.style.minWidth = el.style.minHeight = "";
+    shownKey = null; bubbleHover = false; lastHover = null; detail = null;
+    fadeBubble(el);
     return;
   }
   if (!detail) el.style.minWidth = el.style.minHeight = "";
@@ -383,6 +398,9 @@ function bubble() {
     el.style.borderColor = m.color === "#000" ? "#d2d2d2" : m.color;      // piMap: black ISS -> light grey
     el.classList.toggle("pinned", pinned === m.key);
     el.classList.toggle("interactive", m.kind === "target");
+  }
+  if (el.classList.contains("fading")) {                         // back before the fade finished
+    clearTimeout(fadeTimer); el.classList.remove("fading");
   }
   el.hidden = false;
   if (bubbleHover) return;                                       // don't move it out from under the mouse
@@ -518,7 +536,7 @@ function wireBubble() {
     if (e.target.closest("[data-remove]")) {
       editTarget({ op: "remove", id: m.id });
       if (pinned === m.key) pinned = null;
-      bubbleHover = false; lastHover = null; shownKey = null; el.hidden = true; overAt = 0;
+      bubbleHover = false; lastHover = null; shownKey = null; fadeBubble(el); overAt = 0;
       return;
     }
     const cell = e.target.closest("td.cell");
