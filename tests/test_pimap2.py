@@ -113,6 +113,11 @@ class Api(unittest.TestCase):
         self.assertEqual(self.c.post("/api/tv-settings", json={"key": "nope", "on": True}).status_code, 400)
         self.c.post("/api/tv-settings", json={"key": "borders", "on": True})
 
+    def test_web_files_revalidate(self):
+        r = self.c.get("/web/app.js")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.headers["cache-control"], "no-cache")      # updates reach browsers at once
+
     def test_kiosk_contract(self):
         st = self.c.get("/_fieldlab/status").json()
         self.assertIn(st["state"], ("ready", "degraded", "error"))

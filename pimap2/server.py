@@ -504,7 +504,17 @@ def fieldlab_meta():
             "version": VERSION, "start_grace_s": 60, "heartbeat_timeout_s": 180, "holds": False}
 
 
-app.mount("/web", StaticFiles(directory=WEB), name="web")
+class _Revalidated(StaticFiles):
+    """The map's own scripts and styles: the browser must check back every load (cheap,
+    by ETag), or it can keep running an old app.js for hours after an update."""
+
+    async def get_response(self, path, scope):
+        r = await super().get_response(path, scope)
+        r.headers["Cache-Control"] = "no-cache"
+        return r
+
+
+app.mount("/web", _Revalidated(directory=WEB), name="web")
 app.mount("/fonts", StaticFiles(directory=Path(ROOT) / "fonts"), name="fonts")
 
 
