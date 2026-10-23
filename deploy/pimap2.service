@@ -1,0 +1,16 @@
+[Unit]
+Description=piMap 2.0 server (data + map tiles on http://localhost:8090)
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/projects/piMap
+Environment=PORT=8090
+# Listen on this Pi only; set HOST=0.0.0.0 to open the map from other machines too.
+Environment=HOST=127.0.0.1
+ExecStart=/usr/bin/python3 -m pimap2.server
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

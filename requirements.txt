@@ -7,3 +7,9 @@ paho-mqtt        # FT8 monitor: PSKReporter MQTT live feed (FT8_ENABLED)
 # Optional:
 # timezonefinder   # DST-accurate local time in the header clock (graceful fallback if absent)
 # Pillow           # only needed to regenerate map tiles with make_tiles.py
+
+# piMap 2.0 (HTML5, v2 branch): the server
+fastapi
+uvicorn[standard]
+Pillow           # tools/build_pyramid.py
+# timezonefinder # DST-accurate header clock (optional)

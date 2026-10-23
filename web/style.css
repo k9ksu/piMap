@@ -1,0 +1,65 @@
+/* piMap 2.0. Every size in the header is a fraction of its height (--H), which is
+   SPACE_BAR_HEIGHT/1080 of the screen, so it looks like piMap at 1080p and stays crisp
+   at 4K. */
+
+@font-face { font-family: "AnonymousPro";  src: url("../fonts/AnonymousPro-Bold.ttf");     font-weight: 700; }
+@font-face { font-family: "ShareTechMono"; src: url("../fonts/ShareTechMono-Regular.ttf"); font-weight: 700; }
+@font-face { font-family: "SpaceMono";     src: url("../fonts/SpaceMono-Bold.ttf");        font-weight: 700; }
+@font-face { font-family: "JetBrainsMono"; src: url("../fonts/JetBrainsMono-Bold.ttf");    font-weight: 700; }
+@font-face { font-family: "OverpassMono";  src: url("../fonts/Overpass-Mono.ttf");         font-weight: 700; }
+@font-face { font-family: "B612Mono";      src: url("../fonts/B612Mono-Bold.ttf");         font-weight: 700; }
+@font-face { font-family: "B612Mono";      src: url("../fonts/B612Mono-Regular.ttf");      font-weight: 400; }
+
+:root {
+  color-scheme: dark;
+  --H: 140px;                       /* header height, set by app.js */
+  --hdr-font: "AnonymousPro";
+  --mono: "Courier New", "Liberation Mono", "Nimbus Mono PS", monospace;
+  --text: #e8e8e8; --dim: #9aa3ab; --amber: #f0a020; --red: #ff4b4b; --green: #2fd34a; --off: #6b7178;
+}
+html, body { margin: 0; height: 100%; overflow: hidden; background: #000; color: var(--text); }
+body { display: flex; flex-direction: column; }
+html.tv, html.tv body { cursor: none; }
+
+/* ---- header ----------------------------------------------------------------------- */
+#hdr { height: var(--H); flex: none; position: relative; background: #0c0c0e;
+  font-family: var(--mono); user-select: none; -webkit-user-select: none; }
+#call { position: absolute; left: calc(var(--H) * .14); top: 50%; transform: translateY(-50%);
+  font-family: var(--hdr-font), monospace; font-weight: 700; line-height: 1; white-space: nowrap; }
+#clock { position: absolute; left: 50%; top: calc(var(--H) * .17); transform: translateX(-50%);
+  text-align: center; white-space: nowrap; }
+#local, #utc { font-family: var(--hdr-font), monospace; font-size: calc(var(--H) * .30); line-height: 1.1; }
+#bands { margin-top: calc(var(--H) * .05); font-size: calc(var(--H) * .11); color: var(--dim); letter-spacing: .02em; }
+#bands .Good { color: var(--green); } #bands .Fair { color: var(--amber); } #bands .Poor { color: var(--red); }
+#right { position: absolute; right: calc(var(--H) * .15); top: calc(var(--H) * .05); text-align: right; white-space: nowrap; }
+#swx { font-size: calc(var(--H) * .175); font-weight: 700; display: flex; gap: calc(var(--H) * .5); justify-content: flex-end; }
+#swx b { margin-left: .35em; }
+#geomag { font-size: calc(var(--H) * .12); color: var(--amber); margin-top: calc(var(--H) * .02); }
+#zoomlbl { font-size: calc(var(--H) * .12); color: var(--dim); margin-top: calc(var(--H) * .02); }
+#tags { font-size: calc(var(--H) * .105); display: flex; gap: calc(var(--H) * .12); justify-content: flex-end;
+  margin-top: calc(var(--H) * .03); }
+#tags span::before { content: "●"; margin-right: .25em; }
+#tags .ok { color: var(--green); } #tags .loading, #tags .stale { color: var(--amber); }
+#tags .failed { color: var(--red); } #tags .off { color: var(--off); }
+
+/* ---- map ---------------------------------------------------------------------------- */
+#mapbox { flex: 1; position: relative; overflow: hidden; background: #000; }
+#base, #over { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+#over { touch-action: none; }
+html:not(.tv) #over { cursor: grab; }
+html:not(.tv) #over.dragging { cursor: grabbing; }
+#note { position: absolute; left: 50%; top: 45%; transform: translate(-50%, -50%);
+  font: 500 calc(var(--H) * .14) system-ui, sans-serif; color: #8fa3b8; pointer-events: none; }
+
+/* The TV's view, set from a browser. Never on the TV itself. */
+#tvview { position: absolute; right: 12px; bottom: 12px; display: flex; align-items: center; gap: 8px;
+  padding: 6px 8px 6px 12px; border-radius: 10px; background: rgba(10, 14, 20, .82);
+  border: 1px solid rgba(143, 163, 184, .35); color: #c9d4df;
+  font: 500 14px/1.2 system-ui, sans-serif; user-select: none; -webkit-user-select: none; }
+#tvview[hidden], html.tv #tvview { display: none; }
+#tvview .label { color: #8fa3b8; }
+#tvview .zoom { min-width: 3.4em; text-align: center; font-variant-numeric: tabular-nums; font-weight: 600; }
+#tvview button { min-width: 30px; height: 30px; border-radius: 7px; border: 1px solid rgba(143, 163, 184, .4);
+  background: #17202b; color: #e6edf3; font: 600 17px/1 system-ui, sans-serif; cursor: pointer; }
+#tvview button.wide { padding: 0 10px; font-size: 13px; }
+#tvview button:disabled { opacity: .35; cursor: default; }

@@ -86,6 +86,37 @@ data and the relevant status tag goes amber/red until the fetch recovers.
 | **Hover the right edge** | Satellite selection panel |
 | **Esc** | Quit (note: a kiosk window without keyboard focus will not receive this) |
 
+## piMap 2.0 (HTML5) — `v2` branch, phase 1
+
+piMap 2.0 keeps piMap's Python for the data (QRZ, TLEs, space weather, the same
+`config.py`) and draws the map in a browser instead of pygame:
+
+- **Smooth zoom** on the full-resolution Blue Marble: a 5-level tile pyramid
+  (`tools/build_pyramid.py`, built from `data/maptiles`, never all in memory) so every
+  zoom draws tiles about the size they appear. Wheel, pinch and drag glide; while a
+  sharper tile loads the coarser one stands in and the sharp one fades in.
+- **Satellites glide**: the browser propagates them (SGP4) for every frame it draws,
+  at sub-pixel precision, instead of stepping a pixel at a time.
+- **Crisp at any resolution**: the header is text, the map is drawn at the screen's
+  own pixels (1080p on the shack Pi, 4K on the FieldLab TV).
+- Same look: callsign, clock (with DST via `timezonefinder`), space weather, band
+  conditions, status tags, piMap's `MAP_BRIGHTNESS` and night shading, black ISS track.
+
+Phase 1 is the map, grey line, header, satellites (ISS, plus any `SATS_SHOWN = [norad, ...]`
+in `config.py`; `SAT_FOOTPRINT = False` hides the visibility circles) and mouse zoom/pan.
+Coming: QSO paths (phase 2); target dots, propagation, the settings and satellite
+flyouts (phase 3).
+
+**On the shack Pi** (switches HDMI-2 from the pygame map; `./install2.sh --back` undoes it):
+
+```bash
+git switch v2 && ./install2.sh
+```
+
+**By hand:** `python3 tools/build_pyramid.py`, then `python3 -m pimap2.server` and open
+http://localhost:8090/. Tests: `python3 -m unittest discover -s tests` and
+`node --test tests/web.test.mjs`.
+
 ## Hardware (as used)
 
 - Raspberry Pi 5 (PoE + fan), second HDMI output for the map.

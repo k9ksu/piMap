@@ -216,6 +216,19 @@ def all_sats():
     return sorted(((nid, _tles[nid][0]) for nid in _tles), key=lambda t: t[1])
 
 
+def all_tles():
+    """Load (or refresh) the TLE set if due and return {norad: (name, line1, line2)}.
+
+    piMap 2.0 hands these to the browser, which propagates the satellites itself.
+    Empty if no set could be fetched and there's no cache yet."""
+    try:
+        _ensure_loaded()
+    except Exception:
+        pass                      # logged and reported in the status tags by _load()
+    with _lock:
+        return dict(_tles)
+
+
 # ----------------------------- LOOK ANGLES / PASSES -----------------------------
 
 def _eci_to_ecef(r, gmst):

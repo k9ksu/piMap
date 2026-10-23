@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>piMap</title>
+<link rel="stylesheet" href="web/style.css">
+<script>
+  // ?mode=tv: the kiosk's TV. View only, no pointer, shows the TV view.
+  if (new URLSearchParams(location.search).get("mode") === "tv") document.documentElement.classList.add("tv");
+</script>
+</head>
+<body>
+<header id="hdr">
+  <div id="call"></div>
+  <div id="clock">
+    <div id="local">--:--:--</div>
+    <div id="utc">--:-- UTC</div>
+    <div id="bands"></div>
+  </div>
+  <div id="right">
+    <div id="swx">
+      <span>SFI <b id="sfi">?</b></span><span>Kp <b id="kp">?</b></span>
+      <span>A <b id="aidx">?</b></span><span>Sunspots <b id="ssn">?</b></span>
+    </div>
+    <div id="geomag">Geomag: Unknown</div>
+    <div id="zoomlbl">Zoom 1.0x</div>
+    <div id="tags"></div>
+  </div>
+</header>
+<main id="mapbox">
+  <canvas id="base"></canvas>
+  <canvas id="over"></canvas>
+  <div id="note">Loading the map…</div>
+  <div id="tvview" hidden title="What the TV shows: this zoom, centred on home (the trailer's GPS position)">
+    <span class="label">TV view</span>
+    <button id="tvout" aria-label="TV view: zoom out">−</button>
+    <span class="zoom" id="tvzoom">1.0×</span>
+    <button id="tvin" aria-label="TV view: zoom in">+</button>
+    <button id="tvmine" class="wide" title="Give the TV the zoom you're looking at now (centred on home)">Use my zoom</button>
+  </div>
+</main>
+<script src="web/vendor/satellite.min.js"></script>
+<script type="module" src="web/app.js"></script>
+</body>
+</html>

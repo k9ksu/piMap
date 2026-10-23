@@ -33,3 +33,9 @@ data/*_cache.txt
 # stray editor backup
 config.py.bak
 *.bak
+
+# --- piMap 2.0: built from data/maptiles by tools/build_pyramid.py ---
+data/pyramid/
+
+# --- piMap 2.0 runtime state ---
+data/tv_view.json

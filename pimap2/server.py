@@ -1,0 +1,349 @@
+"""piMap 2.0 server: piMap's data, served to an HTML5 map that draws itself.
+
+The browser (web/) draws everything: the Blue Marble pyramid with smooth zoom, the grey
+line, satellites propagated in the browser so they glide. This server keeps doing what
+piMap's Python has always done well, through piMap's own modules, and hands the results
+over as small JSON:
+
+  GET  /                     the map
+  GET  /api/config           callsign, colours, fonts, home, zoom limits, tile pyramid
+  GET  /api/state            home, TV view, space weather, status tags (polled ~5 s)
+  GET  /api/tles             the amateur TLE set (Celestrak, cached 6 h, as piMap)
+  GET  /tiles/{z}/{x}_{y}.jpg   the pyramid (tools/build_pyramid.py), cached forever
+  GET/POST /api/tv-view      the zoom the TV shows, centred on home
+
+Home is HOME_LAT/HOME_LON from config.py, unless a GPS fix arrives: on FieldLab from
+MQTT (PIMAP_MQTT_HOST, topic fieldlab/location). Everything else is the same
+config.py piMap already uses.
+
+On the FieldLab kiosk it also answers the kiosk's page contract (/_fieldlab/status,
+/_fieldlab/meta), so the kiosk can show and supervise it like any other page.
+
+    python3 -m pimap2.server            (PORT, default 8090)
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import math
+import os
+import threading
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+from fastapi import FastAPI, Request
+from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.staticfiles import StaticFiles
+
+from .settings import ROOT, get, load_config
+
+cfg, CONFIG_SOURCE = load_config()
+
+import applog          # noqa: E402  (piMap's modules import config; it's registered above)
+import sat_tracker     # noqa: E402
+import space_weather   # noqa: E402
+
+log = logging.getLogger("pimap2")
+
+VERSION = "2.0.0-phase1"
+WEB = Path(ROOT) / "web"
+PYRAMID = Path(ROOT) / "data" / "pyramid"
+DATA_DIR = Path(os.environ.get("PIMAP_DATA_DIR", os.path.join(ROOT, "data")))
+VIEW_FILE = DATA_DIR / "tv_view.json"
+KIOSK = os.environ.get("PIMAP_KIOSK", "0") == "1"
+GPS_MAX_AGE_S = 6 * 3600
+STATUS_TAGS = ("tle", "swx", "qrz", "frq", "wsp")
+
+
+# ---- home ---------------------------------------------------------------------------
+class Home:
+    """Where the map is centred and the QTH dot sits: config, or a GPS fix."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.config = (float(get(cfg, "HOME_LAT", 0.0)), float(get(cfg, "HOME_LON", 0.0)))
+        self.gps: tuple[float, float] | None = None
+        self.gps_t = 0.0
+
+    def set_gps(self, lat: float, lon: float, ts: float | None = None) -> None:
+        with self.lock:
+            self.gps, self.gps_t = (round(lat, 4), round(lon, 4)), ts or time.time()
+
+    def now(self) -> dict:
+        with self.lock:
+            if self.gps and time.time() - self.gps_t < GPS_MAX_AGE_S:
+                lat, lon, src = *self.gps, "gps"
+            else:
+                lat, lon, src = *self.config, "config"
+        return {"lat": lat, "lon": lon, "source": src, "tz": tz_name(lat, lon)}
+
+
+_tz_cache: dict = {}
+
+
+def tz_name(lat: float, lon: float) -> str | None:
+    """The IANA zone at home, for the header clock (with DST). None without timezonefinder."""
+    key = (round(lat, 1), round(lon, 1))
+    if key not in _tz_cache:
+        try:
+            from timezonefinder import TimezoneFinder
+            _tz_cache[key] = TimezoneFinder().timezone_at(lat=lat, lng=lon)
+        except Exception:
+            _tz_cache[key] = None
+    return _tz_cache[key]
+
+
+def parse_fix(payload: bytes) -> tuple[float, float, float] | None:
+    """fieldlab/location JSON -> (lat, lon, ts), or None if it isn't a usable fix."""
+    try:
+        d = json.loads(payload) if payload else None
+        lat, lon = float(d["lat"]), float(d["lon"])
+        ts = float(d.get("ts") or time.time())
+    except (ValueError, KeyError, TypeError):
+        return None
+    if not (-90 <= lat <= 90 and -180 <= lon <= 180) or (lat == 0 and lon == 0):
+        return None
+    return lat, lon, ts
+
+
+home = Home()
+
+
+def start_mqtt() -> None:
+    host = os.environ.get("PIMAP_MQTT_HOST")
+    if not host:
+        return
+    try:
+        import paho.mqtt.client as mqtt
+    except ImportError:
+        log.warning("PIMAP_MQTT_HOST set but paho-mqtt isn't installed: no GPS home")
+        return
+    topic = os.environ.get("PIMAP_GPS_TOPIC", "fieldlab/location")
+    c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="pimap2")
+    c.reconnect_delay_set(1, 30)
+    c.on_connect = lambda client, *a: client.subscribe(topic, qos=1)
+
+    def on_message(client, userdata, msg):
+        fix = parse_fix(msg.payload)
+        if fix:
+            home.set_gps(*fix)
+    c.on_message = on_message
+    c.connect_async(host, int(os.environ.get("PIMAP_MQTT_PORT", "1883")), keepalive=30)
+    c.loop_start()
+    log.info("following GPS home on %s %s", host, topic)
+
+
+# ---- the TV view --------------------------------------------------------------------
+def zoom_limits() -> tuple[float, float]:
+    return float(get(cfg, "MIN_ZOOM", 1.0)), float(get(cfg, "MAX_ZOOM", 8.0))
+
+
+def load_tv_zoom() -> float:
+    lo, hi = zoom_limits()
+    try:
+        z = float(json.loads(VIEW_FILE.read_text())["zoom"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return lo
+    return min(max(z, lo), hi)
+
+
+def save_tv_zoom(z: float) -> float:
+    lo, hi = zoom_limits()
+    z = round(min(max(float(z), lo), hi), 3)
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = VIEW_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"zoom": z}))
+        tmp.replace(VIEW_FILE)
+    except OSError as e:
+        log.warning("can't save the TV view: %s", e)
+    return z
+
+
+tv = {"zoom": load_tv_zoom(), "changed": time.time()}
+
+
+# ---- background: keep piMap's sources fresh -----------------------------------------
+class Worker:
+    """Keeps the TLEs and space weather current, the way piMap's main loop did."""
+
+    def __init__(self):
+        self.beat_t: float | None = None
+        self.tle_version = 0
+        self._tle_count = 0
+        self.started = time.time()
+
+    def run(self) -> None:
+        while True:
+            try:
+                n = len(sat_tracker.all_tles())
+                if n != self._tle_count:
+                    self._tle_count = n
+                    self.tle_version += 1
+                space_weather.get_space_weather()     # refreshes itself when stale
+            except Exception:
+                log.exception("refresh failed")
+            self.beat_t = time.time()
+            time.sleep(30)
+
+
+worker = Worker()
+
+
+def status_tags() -> dict:
+    st = applog.get_status()
+    return {k: {"state": st[k][0], "detail": st[k][1]} if k in st else {"state": "off", "detail": ""}
+            for k in STATUS_TAGS}
+
+
+def space_wx() -> dict:
+    sw = space_weather.get_space_weather()
+    return {k: v for k, v in sw.items() if not k.startswith("_")}
+
+
+def public_config() -> dict:
+    lo, hi = zoom_limits()
+    try:
+        pyramid = json.loads((PYRAMID / "pyramid.json").read_text())
+    except (OSError, ValueError):
+        pyramid = None
+    c = lambda n, d: get(cfg, n, d)
+    return {
+        "version": VERSION,
+        "settings": CONFIG_SOURCE,
+        "callsign": c("QRZ_USER_AGENT_CALLSIGN", "piMap"),
+        "header": {"font": c("HEADER_FONT", "AnonymousPro"), "fill": c("HEADER_FILL", 0.5),
+                   "color": c("HEADER_COLOR", "#512888"),
+                   "bar_fraction": c("SPACE_BAR_HEIGHT", 90) / 1080.0,
+                   "band_conditions": c("BAND_CONDITIONS_ENABLED", True)},
+        "colors": {"qth": c("QTH_COLOR", "#00FF00"), "qso": c("QSO_COLOR", "#FFC800")},
+        "map": {"brightness": c("MAP_BRIGHTNESS", 1.15), "greyline": c("GREYLINE_ENABLED", True),
+                "night_alpha": c("NIGHT_ALPHA", 75), "min_zoom": lo, "max_zoom": hi,
+                "zoom_step": c("ZOOM_STEP", 1.15)},
+        "iss": {"width": c("ISS_ICON_WIDTH_PX", 62), "halo_px": c("ISS_ICON_HALO_PX", 0.25),
+                "halo_alpha": c("ISS_ICON_HALO_ALPHA", 0.1), "halo_color": c("ISS_ICON_HALO_COLOR", "#FFFFFF"),
+                "shadow": [c("ISS_ICON_SHADOW_X", -7.5), c("ISS_ICON_SHADOW_Y", 7.5)],
+                "shadow_alpha": c("ISS_ICON_SHADOW_ALPHA", 0.1), "shadow_gray": c("ISS_ICON_SHADOW_GRAY", 0.5)},
+        "sats": {"dot_radius": c("SAT_DOT_RADIUS", 6), "show": list(c("SATS_SHOWN", [25544])),
+                 "footprint": bool(c("SAT_FOOTPRINT", True))},
+        "pyramid": pyramid,
+        "kiosk": KIOSK,                 # the FieldLab kiosk: browsers get the TV view panel
+    }
+
+
+# ---- the app ------------------------------------------------------------------------
+app = FastAPI(title="piMap 2.0", docs_url=None, redoc_url=None)
+NO_STORE = {"Cache-Control": "no-store"}
+
+
+@app.get("/")
+def index():
+    return FileResponse(WEB / "index.html", headers={"Cache-Control": "no-cache"})
+
+
+@app.get("/api/config")
+def api_config():
+    return JSONResponse(public_config(), headers=NO_STORE)
+
+
+@app.get("/api/state")
+def api_state():
+    return JSONResponse({"home": home.now(), "tv": {"zoom": tv["zoom"], "changed": tv["changed"]},
+                         "space_weather": space_wx(), "status": status_tags(),
+                         "tle_version": worker.tle_version, "now": time.time()},
+                        headers=NO_STORE)
+
+
+@app.get("/api/tles")
+def api_tles():
+    tles = sat_tracker.all_tles()
+    return JSONResponse({"version": worker.tle_version,
+                         "sats": [{"norad": n, "name": t[0], "l1": t[1], "l2": t[2]}
+                                  for n, t in sorted(tles.items())]},
+                        headers={"Cache-Control": "no-cache"})
+
+
+@app.get("/api/tv-view")
+def get_tv_view():
+    lo, hi = zoom_limits()
+    return JSONResponse({"zoom": tv["zoom"], "min": lo, "max": hi, "centre": home.now()}, headers=NO_STORE)
+
+
+@app.post("/api/tv-view")
+async def set_tv_view(request: Request):
+    try:
+        body = await request.json()
+        z = float(body["zoom"])
+        if not math.isfinite(z):
+            raise ValueError
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return JSONResponse({"ok": False, "error": "expected {zoom: number}"}, status_code=400)
+    tv["zoom"], tv["changed"] = save_tv_zoom(z), time.time()
+    return {"ok": True, "zoom": tv["zoom"]}
+
+
+_TILE_HEADERS = {"Cache-Control": "public, max-age=31536000, immutable"}
+
+
+@app.get("/tiles/{z}/{name}")
+def tile(z: int, name: str):
+    p = PYRAMID / str(z) / name
+    if not (0 <= z <= 8 and name.endswith(".jpg") and "/" not in name and p.is_file()):
+        return Response(status_code=404)
+    return FileResponse(p, media_type="image/jpeg", headers=_TILE_HEADERS)
+
+
+@app.get("/iss.webp")
+def iss_icon():
+    return FileResponse(Path(ROOT) / get(cfg, "ISS_ICON_FILE", "images/iss.webp"),
+                        headers={"Cache-Control": "public, max-age=86400"})
+
+
+# ---- the FieldLab kiosk's page contract (harmless elsewhere) -------------------------
+@app.get("/_fieldlab/status")
+def fieldlab_status():
+    now = time.time()
+    ready = (PYRAMID / "pyramid.json").is_file()
+    state, msg, detail = ("ready", "", "") if ready else (
+        "error", "Map tiles not built", "Run tools/build_pyramid.py")
+    if ready and CONFIG_SOURCE == "example":
+        state, msg, detail = "degraded", "No piMap settings", "config.py not found: example settings"
+    beat = worker.beat_t
+    since = datetime.fromtimestamp(worker.started, timezone.utc).isoformat(timespec="seconds")
+    return JSONResponse({
+        "id": "pimap", "state": state, "message": msg, "detail": detail,
+        "since": since, "in_state_s": round(now - worker.started, 1),
+        "heartbeat": None if beat is None else datetime.fromtimestamp(beat, timezone.utc).isoformat(timespec="seconds"),
+        "heartbeat_age_s": None if beat is None else round(now - beat, 1),
+        "uptime_s": round(now - worker.started, 1), "active": False, "tv_active": False,
+        "version": VERSION}, headers=NO_STORE)
+
+
+@app.get("/_fieldlab/meta")
+def fieldlab_meta():
+    return {"id": "pimap", "title": "piMap", "icon": "globe", "order": 25, "kind": "page",
+            "version": VERSION, "start_grace_s": 60, "heartbeat_timeout_s": 180, "holds": False}
+
+
+app.mount("/web", StaticFiles(directory=WEB), name="web")
+app.mount("/fonts", StaticFiles(directory=Path(ROOT) / "fonts"), name="fonts")
+
+
+@app.on_event("startup")
+def _start():
+    start_mqtt()
+    threading.Thread(target=worker.run, name="refresh", daemon=True).start()
+
+
+def main() -> None:
+    import uvicorn
+    logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"),
+                        format="%(asctime)s %(name)s %(levelname)s %(message)s")
+    uvicorn.run(app, host=os.environ.get("HOST", "0.0.0.0"), port=int(os.environ.get("PORT", "8090")),
+                log_level="warning")
+
+
+if __name__ == "__main__":
+    main()
