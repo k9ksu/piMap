@@ -101,7 +101,7 @@ class Api(unittest.TestCase):
     def test_status_labels_as_pimap(self):
         st = self.c.get("/api/state").json()["status"]
         self.assertEqual([v["label"] for v in st.values()], ["TLE", "SWX", "QRZ", "FRQ", "WSP"])
-        self.assertEqual(st["qrz"]["state"], "off")                 # not running in piMap 2.0 yet
+        self.assertEqual(st["wspr"]["state"], "off")                # not running in piMap 2.0 yet
 
     def test_tv_settings(self):
         st = self.c.get("/api/state").json()["tv"]["settings"]
