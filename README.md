@@ -121,6 +121,12 @@ field's biggest cities and the FT8 | WSPR band table; click a cell for the stati
 heard both ways. Dots, spot mode and alert sound are shared by every screen
 (`data/targets.json`, `data/prefs.json`; a shack piMap's `targets.json` and
 `ui_prefs.json` are picked up the first time); chime on/off and volume are per screen.
+**TV remote** (for a screen run as `?mode=tv`, like the FieldLab TV): `?mode=remote`, or
+the second port `PIMAP_REMOTE_PORT` opens straight on it. It's a live copy of the TV,
+the TV's own shape and settings (the TV reports its size); drag, wheel or pinch it and
+the TV follows within a second. **Follow GPS** keeps the TV centred on home as it moves;
+a pan turns it off and the TV stays where you put it; **⌂ Home** (or right-click) puts it
+back. Its left menu is the TV's settings. The view is saved in `data/tv_view.json`.
 
 **On the shack Pi** (switches HDMI-2 from the pygame map; `./install2.sh --back` undoes it):
 

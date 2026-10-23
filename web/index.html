@@ -7,7 +7,10 @@
 <link rel="stylesheet" href="web/style.css">
 <script>
   // ?mode=tv: the kiosk's TV. View only, no pointer, shows the TV view.
-  if (new URLSearchParams(location.search).get("mode") === "tv") document.documentElement.classList.add("tv");
+  // ?mode=remote (or the remote's own port): a live copy of the TV that sets what it shows.
+  const mode = new URLSearchParams(location.search).get("mode");
+  if (mode === "tv") document.documentElement.classList.add("tv");
+  if (mode === "remote") document.documentElement.classList.add("remote");
 </script>
 </head>
 <body>
@@ -48,14 +51,17 @@
   </aside>
   <button id="settab" class="edgetab left" aria-label="Settings">⚙</button>
   <button id="sattab" class="edgetab right" aria-label="Satellites">🛰</button>
-  <div id="tvview" hidden title="What the TV shows: this zoom, centred on home (the trailer's GPS position)">
-    <span class="label">TV view</span>
-    <button id="tvout" aria-label="TV view: zoom out">−</button>
-    <span class="zoom" id="tvzoom">1.0×</span>
-    <button id="tvin" aria-label="TV view: zoom in">+</button>
-    <button id="tvmine" class="wide" title="Give the TV the zoom you're looking at now (centred on home)">Use my zoom</button>
-  </div>
 </main>
+<div id="remotebar" hidden>
+  <span class="title">TV remote</span>
+  <span class="sub">drag and zoom the picture; the TV follows</span>
+  <span class="grow"></span>
+  <button id="rzout" aria-label="Zoom out">−</button>
+  <span id="rzoom">1.0×</span>
+  <button id="rzin" aria-label="Zoom in">+</button>
+  <label class="follow" title="Keep the TV centred on the trailer's GPS position"><input type="checkbox" id="rfollow" checked> Follow GPS</label>
+  <button id="rhome" class="wide" title="Back to the trailer's GPS position (right-click does this too)">⌂ Home</button>
+</div>
 <script src="web/vendor/satellite.min.js"></script>
 <script type="module" src="web/app.js"></script>
 </body>

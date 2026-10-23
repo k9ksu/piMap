@@ -7,8 +7,9 @@
 //                  as the fastest satellite needs to move a fifth of a pixel (glide)
 //   header         plain HTML text, crisp at any resolution
 //
-// ?mode=tv (the FieldLab kiosk's TV): no pointer, and the view follows the TV view (a
-// zoom set from any browser, always centred on home). Browsers each have their own view.
+// ?mode=tv (the FieldLab kiosk's TV): no pointer; it shows the TV view and draws what the
+// TV settings say. ?mode=remote (the kiosk's port 8081): a live mirror of the TV, the TV's
+// shape; drag and zoom it and the TV follows. Other browsers each have their own view.
 "use strict";
 
 import { View } from "./view.js";
@@ -22,6 +23,7 @@ import { Chime } from "./chime.js";
 import { setupPanels, loadSettings, DEFAULT_SETTINGS, fmtPass } from "./panels.js";
 
 const TV = document.documentElement.classList.contains("tv");
+const REMOTE = !TV && document.documentElement.classList.contains("remote");
 // ?debug=1&off=night,borders,sats,tiles,bright: switch layers off to find what's costly
 const QS = new URLSearchParams(location.search);
 const OFF = new Set(QS.get("debug") ? (QS.get("off") || "").split(",") : []);
@@ -42,6 +44,9 @@ let fadeTimer = 0, fadeKey = null, placedKey = null;
 const DWELL_MS = 400;                // the cursor rests this long on a dot before its bubble shows
 let dwell = null, dwellTimer = 0;
 let lastHover = null, graceTimer = 0;
+// the remote: when the user last moved the picture, whether that still has to reach the
+// TV, and whether the TV follows GPS (home) or stays where it was put
+let userAt = -1e9, remoteDirty = false, postAt = 0, remoteFollow = true, screenKey = "";
 let state = null, home = null, dpr = 1, u = 1;
 let baseDirty = true, overAt = 0, tleVersion = -1, tvSeen = null;
 let speed = 0, speedAt = 0, changedAt = 0;
@@ -84,37 +89,61 @@ async function start() {
 
   resize();
   window.addEventListener("resize", resize);
-  if (!TV) {
+  if (TV) {
+    // tell the server the TV's size, so the remote can show exactly this picture
+    const report = () => fetch("api/tv-screen", { method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ w: window.innerWidth, h: window.innerHeight }) }).catch(() => {});
+    report();
+    window.addEventListener("resize", report);
+    setInterval(report, 60000);                     // and again after a server restart
+  } else {
     wireInput();
     wireBubble();
     // the chime: on for the shack screen; on the kiosk only the TV chimes unless a browser opts in
     settings = loadSettings({ chime: !conf.kiosk && (conf.targets ? conf.targets.sound_on : true),
                               volume: conf.targets ? conf.targets.volume : 0.8 });
+    if (REMOTE) settings = { ...DEFAULT_SETTINGS, chime: false };   // the TV's, once the server says
     applySettings(settings);
+    const remoteUrl = REMOTE || !conf.kiosk ? null
+      : conf.remote_port ? `${location.protocol}//${location.hostname}:${conf.remote_port}/` : "?mode=remote";
     panels = setupPanels({ sats, settings, onSettings: applySettings, onToggleSat: toggleSat,
                   serverNow: () => (Date.now() + clockSkew) / 1000,
-                  tv: conf.kiosk ? { get: () => state && state.tv.settings, set: setTvSetting } : null,
+                  tv: conf.kiosk || REMOTE ? { get: () => state && state.tv.settings, set: setTvSetting } : null,
+                  tvOnly: REMOTE, remoteUrl,
                   sound: conf.targets && conf.targets.wspr_on ? {
                     modes: conf.targets.modes, sounds: conf.targets.sounds, get: () => state && state.prefs,
                     set: setPrefs, test: () => { chime.unlock(); chime.play(state.prefs.alert_sound, settings.volume ?? 0.8); },
                   } : null });
   }
-  if (!TV && conf.kiosk) wireTvPanel();
+  if (REMOTE) { wireRemote(); document.querySelector("#setpanel h2").textContent = "TV SETTINGS"; }
   if (QS.get("debug")) window.__pimap = { view, sats, tiles, borders, targets, chime, get settings() { return settings; }, get pinned() { return pinned; }, get lastHover() { return lastHover; }, get pointer() { return pointer; } };   // for measuring and tests
   await poll();
   setInterval(poll, 5000);
+  if (TV || REMOTE) setInterval(pollTv, 1000);      // the TV view changes from the remote: follow it quickly
   setInterval(clock, 250);
   requestAnimationFrame(frame);
 }
 
 function resize() {
   dpr = window.devicePixelRatio || 1;
-  const H = Math.round(window.innerHeight * (conf ? conf.header.bar_fraction : 0.13));
+  let sh = window.innerHeight;                      // the screen height everything is sized from
+  if (REMOTE) {
+    // the remote: the page laid out as the TV, its shape, as big as fits under the bar
+    const scr = (state && state.tv && state.tv.screen) || { w: 1920, h: 1080 }, a = scr.w / scr.h;
+    const bar = $("remotebar").offsetHeight, pad = 8;
+    const aw = window.innerWidth - 2 * pad, ah = window.innerHeight - bar - 2 * pad;
+    const w = Math.max(100, Math.min(aw, ah * a)), h = w / a;
+    const bs = document.body.style;
+    bs.width = `${w}px`; bs.height = `${h}px`;
+    bs.left = `${(window.innerWidth - w) / 2}px`; bs.top = `${bar + pad + (ah - h) / 2}px`;
+    sh = h;
+  }
+  const H = Math.round(sh * (conf ? conf.header.bar_fraction : 0.13));
   document.documentElement.style.setProperty("--H", `${H}px`);
   if (conf) $("call").style.fontSize = `${(H * conf.header.fill) / 0.72}px`;
   const box = $("mapbox").getBoundingClientRect();
   for (const c of [base, over]) { c.width = Math.round(box.width * dpr); c.height = Math.round(box.height * dpr); }
-  u = (window.innerHeight * dpr) / 1080;           // piMap's 1080p pixel, in device px
+  u = (sh * dpr) / 1080;                           // piMap's 1080p pixel, in device px
   if (view) view.resize(box.width, box.height);
   if (borders) borders.resize(base.width, base.height);
   baseDirty = true; overAt = 0;
@@ -131,32 +160,47 @@ async function poll() {
   if (state.sats && state.sats.version !== satsVersion) {
     satsVersion = state.sats.version; sats.show = new Set(state.sats.shown); overAt = 0;
   }
-  const h = state.home, moved = !home || home.lat !== h.lat || home.lon !== h.lon;
-  home = h;
+  home = state.home;
   if (state.tle_version !== tleVersion) {
     try { const t = await getJSON("api/tles"); sats.setTles(t.sats); tleVersion = t.version; overAt = 0; }
     catch (e) { /* next poll */ }
   }
-  // the TV draws what the left menu's TV column says; browsers keep their own
-  const tvs = JSON.stringify(state.tv.settings || {});
+  applyTv(state.tv);
+  header();
+}
+
+async function pollTv() {
+  if (!state) return;
+  try { applyTv(await getJSON("api/tv-view")); } catch (e) { /* next time */ }
+}
+
+/** The TV view and settings from the server: the TV follows them; the remote too, unless
+ *  its user is moving the picture right now. Other browsers only open on it. */
+function applyTv(tv) {
+  state.tv = tv;
+  // the TV draws what the TV settings say (the left menu's TV column); browsers keep their own
+  const tvs = JSON.stringify(tv.settings || {});
   if (tvs !== tvSettingsKey) {
     tvSettingsKey = tvs;
-    if (TV) {
-      settings = { ...DEFAULT_SETTINGS, volume: conf.targets ? conf.targets.volume : 0.8, ...state.tv.settings };
+    if (TV || REMOTE) {
+      settings = { ...DEFAULT_SETTINGS, volume: conf.targets ? conf.targets.volume : 0.8, ...tv.settings };
+      if (REMOTE) settings.chime = false;           // the TV chimes, not the remote
       applySettings(settings);
     }
-    else if (panels) panels.syncTv(state.tv.settings);
+    if (panels) panels.syncTv(tv.settings);
   }
-  if (panels && state.prefs) panels.syncPrefs(state.prefs);
-  const tvKey = `${state.tv.zoom}|${h.lat}|${h.lon}`;
+  if (REMOTE) {
+    const sk = tv.screen ? `${tv.screen.w}x${tv.screen.h}` : "";
+    if (sk !== screenKey) { screenKey = sk; resize(); }
+  }
+  const c = tv.centre || home, key = `${tv.zoom}|${c.lat}|${c.lon}`;
   if (tvSeen === null) {
-    view.set(state.tv.zoom, h.lon, h.lat);          // everyone opens on the TV view
-  } else if (TV && (tvKey !== tvSeen || moved)) {
-    view.flyTo(state.tv.zoom, h.lon, h.lat);
+    view.set(tv.zoom, c.lon, c.lat);                 // everyone opens on the TV view
+  } else if (key !== tvSeen && (TV || (REMOTE && !remoteBusy()))) {
+    view.flyTo(tv.zoom, c.lon, c.lat);
   }
-  tvSeen = tvKey;
-  if (!TV && conf.kiosk) showTvZoom(state.tv.zoom);
-  header();
+  tvSeen = key;
+  if (REMOTE && !remoteBusy()) { remoteFollow = !!tv.follow; showRemote(); }
 }
 
 const BAND_ORDER = ["80m-40m", "30m-20m", "17m-15m", "12m-10m"];
@@ -203,6 +247,7 @@ function clock() {
   }
   $("local").textContent = local;
   if (view) $("zoomlbl").textContent = `Zoom ${view.zoom.toFixed(1)}x`;
+  if (REMOTE && view) $("rzoom").textContent = `${view.zoom.toFixed(1)}×`;
 }
 
 // ---- drawing --------------------------------------------------------------------------
@@ -221,6 +266,14 @@ function frame(t) {
   const every = speed > 0 ? Math.min(1000, Math.max(16, 200 / speed)) : 1000;
   if (viewMoved || moving || targets.pinging || targets.drag || t - overAt >= every) drawOver(t);
   view.changed = false;
+  if (REMOTE && remoteDirty) {                      // the remote: send the picture to the TV
+    const settled = t - userAt > 200 && !moving;     // when it comes to rest, and every 0.4 s on the way
+    if (settled || t - postAt > 400) {
+      postAt = t;
+      if (settled) remoteDirty = false;
+      sendTvView();
+    }
+  }
   requestAnimationFrame(frame);
 }
 
@@ -609,7 +662,9 @@ function wireInput() {
       const [a, b] = [...pts.values()];
       const d = Math.hypot(a.x - b.x, a.y - b.y);
       if (pinch.d > 0) {
-        view.zoomAt(d / pinch.d, (a.x + b.x) / 2, (a.y + b.y) / 2);
+        if (REMOTE && remoteFollow) zoomOnHome(d / pinch.d);       // following GPS: stays on home
+        else view.zoomAt(d / pinch.d, (a.x + b.x) / 2, (a.y + b.y) / 2);
+        userMoved(false);
         view.step(1);                  // pinch follows the fingers exactly
       }
       pinch.d = d;
@@ -626,6 +681,7 @@ function wireInput() {
       return;
     }
     view.panBy(dx, dy);
+    userMoved(true);
     drag.vx = 0.8 * (dx / dt) + 0.2 * drag.vx; drag.vy = 0.8 * (dy / dt) + 0.2 * drag.vy;
     drag.x = p.x; drag.y = p.y; drag.t = now;
   });
@@ -638,9 +694,10 @@ function wireInput() {
       const td = targets.drag;
       editTarget({ op: "move", id: td.id, lat: td.lat, lon: td.lon }).then(() => { targets.drag = null; overAt = 0; });
     } else if (drag.moved) {
-      if (performance.now() - drag.t < 80) view.fling(drag.vx, drag.vy);
+      if (performance.now() - drag.t < 80) { view.fling(drag.vx, drag.vy); userMoved(true); }
     } else if (drag.button === 2 && home) {
-      view.flyTo(conf.map.min_zoom, home.lon, home.lat);          // piMap: right click = reset view
+      if (REMOTE) goHome();                                       // the remote: the TV back on home
+      else view.flyTo(conf.map.min_zoom, home.lon, home.lat);     // piMap: right click = reset view
     } else if (drag.button === 0) {
       // piMap: click a dot to pin/unpin its bubble; click empty map to dismiss
       const p = at(e), m = hitAny(p.x * dpr, p.y * dpr);
@@ -673,30 +730,72 @@ function wireInput() {
     const p = at(e);
     const px = e.deltaMode === 1 ? e.deltaY * 33 : e.deltaMode === 2 ? e.deltaY * 400 : e.deltaY;
     const step = Math.log(conf.map.zoom_step || 1.15);           // one mouse notch = one piMap step
-    view.zoomAt(Math.exp((-px / 100) * step), p.x, p.y);
+    const f = Math.exp((-px / 100) * step);
+    if (REMOTE && remoteFollow) zoomOnHome(f);                   // following GPS: zoom on home
+    else view.zoomAt(f, p.x, p.y);
+    userMoved(false);
   }, { passive: false });
 }
 
-// ---- the TV view panel (browsers only) --------------------------------------------------
-function showTvZoom(z) {
-  $("tvzoom").textContent = `${z.toFixed(1)}×`;
-  $("tvout").disabled = z <= conf.map.min_zoom + 1e-6;
-  $("tvin").disabled = z >= conf.map.max_zoom - 1e-6;
-  $("tvview").hidden = false;
+// ---- the TV remote (?mode=remote) --------------------------------------------------------
+/** The user moved the picture (a pan stops following GPS); the frame loop sends it to the TV. */
+function userMoved(pan) {
+  if (!REMOTE) return;
+  userAt = performance.now(); remoteDirty = true;
+  if (pan && remoteFollow) { remoteFollow = false; showRemote(); }
 }
 
-function wireTvPanel() {
-  const send = async (zoom) => {
-    try {
-      const r = await getJSON("api/tv-view", { method: "POST", headers: { "content-type": "application/json" },
-                                               body: JSON.stringify({ zoom }) });
-      if (r.ok) { state.tv.zoom = r.zoom; showTvZoom(r.zoom); }
-    } catch (e) { /* server restarting */ }
-  };
+/** Moving now, or the server hasn't had it yet: don't fly away from what the user is doing. */
+function remoteBusy() { return remoteDirty || performance.now() - userAt < 1500; }
+
+async function sendTvView() {
+  const zoom = view.target && view.target.zoom ? view.target.zoom : view.zoom;
+  const body = remoteFollow ? { zoom, follow: true } : { zoom, lon: view.lon, lat: view.lat };
+  try {
+    const r = await getJSON("api/tv-view", { method: "POST", headers: { "content-type": "application/json" },
+                                             body: JSON.stringify(body) });
+    if (r.ok) applyTv(r);
+  } catch (e) { remoteDirty = true; }               // server restarting: try again
+}
+
+function zoomOnHome(f) {
+  const z = (view.target && view.target.zoom ? view.target.zoom : view.zoom) * f;
+  const c = home || { lon: view.lon, lat: view.lat };
+  view.flyTo(z, c.lon, c.lat);
+}
+
+function goHome() {
+  if (!home) return;
+  remoteFollow = true; showRemote();
+  const z = view.target && view.target.zoom ? view.target.zoom : view.zoom;
+  view.flyTo(z, home.lon, home.lat);
+  userMoved(false);
+}
+
+function showRemote() {
+  $("rfollow").checked = remoteFollow;
+  $("rhome").disabled = remoteFollow;
+}
+
+function wireRemote() {
+  $("remotebar").hidden = false;
+  resize();
   const step = () => conf.map.zoom_step || 1.15;
-  $("tvin").addEventListener("click", () => send(state.tv.zoom * step()));
-  $("tvout").addEventListener("click", () => send(state.tv.zoom / step()));
-  $("tvmine").addEventListener("click", () => send(view.zoom));
+  const zoomBy = (f) => {
+    if (remoteFollow) zoomOnHome(f);
+    else {
+      const z = (view.target && view.target.zoom ? view.target.zoom : view.zoom) * f;
+      view.flyTo(z, view.lon, view.lat);
+    }
+    userMoved(false);
+  };
+  $("rzin").addEventListener("click", () => zoomBy(step()));
+  $("rzout").addEventListener("click", () => zoomBy(1 / step()));
+  $("rhome").addEventListener("click", goHome);
+  $("rfollow").addEventListener("change", () => {
+    if ($("rfollow").checked) goHome();
+    else { remoteFollow = false; showRemote(); userMoved(false); }
+  });
 }
 
 // ---- target dots: status, and the chime when a path opens -------------------------------------

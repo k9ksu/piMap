@@ -48,7 +48,8 @@ class Flyout {
   }
 }
 
-export function setupPanels({ sats, settings, onSettings, serverNow, onToggleSat, tv = null, sound = null }) {
+export function setupPanels({ sats, settings, onSettings, serverNow, onToggleSat, tv = null, sound = null,
+                             tvOnly = false, remoteUrl = null }) {
   const left = new Flyout(document.getElementById("setpanel"), "left", document.getElementById("settab"));
   const right = new Flyout(document.getElementById("satpanel"), "right", document.getElementById("sattab"));
   let lastMove = performance.now();
@@ -56,9 +57,11 @@ export function setupPanels({ sats, settings, onSettings, serverNow, onToggleSat
   document.addEventListener("pointermove", (e) => {
     lastMove = performance.now();
     if (e.pointerType !== "mouse") return;
-    const w = window.innerWidth;
-    if (e.clientX <= EDGE_PX) { left.set(true); left.leftAt = 0; }
-    if (e.clientX >= w - 1 - EDGE_PX) { right.set(true); right.leftAt = 0; }
+    // the map's edges (the whole window, except on the remote, where the map is a framed TV)
+    const r = document.getElementById("mapbox").getBoundingClientRect();
+    if (e.clientY < r.top || e.clientY > r.bottom) return;
+    if (e.clientX >= r.left - EDGE_PX && e.clientX <= r.left + EDGE_PX) { left.set(true); left.leftAt = 0; }
+    if (e.clientX <= r.right + EDGE_PX && e.clientX >= r.right - 1 - EDGE_PX) { right.set(true); right.leftAt = 0; }
   });
   setInterval(() => {
     const now = performance.now();
@@ -71,6 +74,7 @@ export function setupPanels({ sats, settings, onSettings, serverNow, onToggleSat
 
   // ---- settings (left): yours, and on the kiosk the TV's too ----
   // tv: null at the shack; on the kiosk {get: () => settings, set: async (key, on) => ok}
+  // tvOnly: the TV remote, where the one column is the TV's
   const box = document.getElementById("setlist");
   const items = [
     ["night", "Night shading (grey line)"],
@@ -84,8 +88,9 @@ export function setupPanels({ sats, settings, onSettings, serverNow, onToggleSat
   const tvBoxes = new Map();
   let syncPrefs = () => {};
   box.textContent = "";
-  box.classList.toggle("two", !!tv);
-  if (tv) {
+  const two = !!tv && !tvOnly;
+  box.classList.toggle("two", two);
+  if (two) {
     const head = document.createElement("div");
     head.className = "row head";
     head.innerHTML = '<span class="col">Me</span><span class="col">TV</span><span></span>';
@@ -94,11 +99,14 @@ export function setupPanels({ sats, settings, onSettings, serverNow, onToggleSat
   for (const [key, label] of items) {
     const row = document.createElement("div");
     row.className = "row";
-    const mine = document.createElement("input");
-    mine.type = "checkbox"; mine.checked = !!settings[key];
-    mine.title = "This browser";
-    mine.addEventListener("change", () => { settings[key] = mine.checked; saveSettings(settings); onSettings(settings); });
-    row.appendChild(mine);
+    let mine = null;
+    if (!tvOnly) {
+      mine = document.createElement("input");
+      mine.type = "checkbox"; mine.checked = !!settings[key];
+      mine.title = "This browser";
+      mine.addEventListener("change", () => { settings[key] = mine.checked; saveSettings(settings); onSettings(settings); });
+      row.appendChild(mine);
+    }
     if (tv) {
       const t = document.createElement("input");
       t.type = "checkbox"; t.checked = !!(tv.get() || {})[key];
@@ -113,7 +121,7 @@ export function setupPanels({ sats, settings, onSettings, serverNow, onToggleSat
       row.appendChild(t);
     }
     const name = document.createElement("span"); name.textContent = label;
-    name.addEventListener("click", () => mine.click());
+    name.addEventListener("click", () => (mine || tvBoxes.get(key)).click());
     row.appendChild(name);
     box.appendChild(row);
   }
@@ -134,17 +142,27 @@ export function setupPanels({ sats, settings, onSettings, serverNow, onToggleSat
     };
     const modeSel = pick("Spot mode (dot = mode likelihood)", sound.modes, "spot_mode");
     const soundSel = pick("Alert sound", sound.sounds, "alert_sound");
-    const vol = document.createElement("label"); vol.className = "row pick";
-    const vt = document.createElement("span"); vt.textContent = "Chime volume (this browser)";
-    const range = document.createElement("input"); range.type = "range"; range.min = "0"; range.max = "1"; range.step = "0.05";
-    range.value = String(settings.volume ?? 0.8);
-    range.addEventListener("change", () => { settings.volume = Number(range.value); saveSettings(settings); });
-    vol.append(vt, range); extra.appendChild(vol);
+    if (!tvOnly) {                                   // the remote never chimes itself
+      const vol = document.createElement("label"); vol.className = "row pick";
+      const vt = document.createElement("span"); vt.textContent = "Chime volume (this browser)";
+      const range = document.createElement("input"); range.type = "range"; range.min = "0"; range.max = "1"; range.step = "0.05";
+      range.value = String(settings.volume ?? 0.8);
+      range.addEventListener("change", () => { settings.volume = Number(range.value); saveSettings(settings); });
+      vol.append(vt, range); extra.appendChild(vol);
+    }
     const test = document.createElement("button"); test.className = "test"; test.textContent = "Test chime";
     test.addEventListener("click", () => sound.test());
     extra.appendChild(test);
     syncPrefs = (p) => { if (p && document.activeElement !== modeSel) modeSel.value = p.spot_mode;
                          if (p && document.activeElement !== soundSel) soundSel.value = p.alert_sound; };
+  }
+
+  if (remoteUrl) {                                   // the kiosk: set what the TV shows
+    const a = document.createElement("a");
+    a.className = "remotelink"; a.href = remoteUrl; a.target = "pimap-remote";
+    a.textContent = "Open the TV remote ↗";
+    a.title = "A live copy of the TV: drag and zoom it to set what the TV shows";
+    extra.appendChild(a);
   }
 
   /** Keep the TV column in step with the server (another browser may change it). */

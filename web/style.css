@@ -52,18 +52,28 @@ html:not(.tv) #over.dragging { cursor: grabbing; }
 #note { position: absolute; left: 50%; top: 45%; transform: translate(-50%, -50%);
   font: 500 calc(var(--H) * .14) system-ui, sans-serif; color: #8fa3b8; pointer-events: none; }
 
-/* The TV's view, set from a browser. Never on the TV itself. */
-#tvview { position: absolute; right: 12px; bottom: 12px; display: flex; align-items: center; gap: 8px;
-  padding: 6px 8px 6px 12px; border-radius: 10px; background: rgba(10, 14, 20, .82);
-  border: 1px solid rgba(143, 163, 184, .35); color: #c9d4df;
-  font: 500 14px/1.2 system-ui, sans-serif; user-select: none; -webkit-user-select: none; }
-#tvview[hidden], html.tv #tvview { display: none; }
-#tvview .label { color: #8fa3b8; }
-#tvview .zoom { min-width: 3.4em; text-align: center; font-variant-numeric: tabular-nums; font-weight: 600; }
-#tvview button { min-width: 30px; height: 30px; border-radius: 7px; border: 1px solid rgba(143, 163, 184, .4);
-  background: #17202b; color: #e6edf3; font: 600 17px/1 system-ui, sans-serif; cursor: pointer; }
-#tvview button.wide { padding: 0 10px; font-size: 13px; }
-#tvview button:disabled { opacity: .35; cursor: default; }
+/* The TV remote (?mode=remote): the page is laid out as the TV, framed under a bar. */
+html.remote { background: #15181d; }
+html.remote body { position: absolute; height: auto; box-shadow: 0 0 0 1px #3b4d62, 0 6px 30px rgba(0, 0, 0, .6); }
+#remotebar { position: fixed; left: 0; right: 0; top: 0; height: 46px; box-sizing: border-box; z-index: 20;
+  display: flex; align-items: center; gap: 10px; padding: 0 14px; background: #0c0f14;
+  border-bottom: 1px solid #263240; color: #c9d4df; font: 500 14px/1.2 system-ui, sans-serif;
+  user-select: none; -webkit-user-select: none; }
+#remotebar[hidden] { display: none; }
+#remotebar .title { font-weight: 700; color: #f0a020; letter-spacing: .03em; }
+#remotebar .sub { color: #7f8b98; }
+#remotebar .grow { flex: 1; }
+#remotebar #rzoom { min-width: 3.4em; text-align: center; font-variant-numeric: tabular-nums; font-weight: 600; }
+#remotebar button { min-width: 32px; height: 30px; border-radius: 7px; border: 1px solid rgba(143, 163, 184, .4);
+  background: #17202b; color: #e8eef5; font: inherit; font-size: 17px; cursor: pointer; }
+#remotebar button.wide { padding: 0 12px; font-size: 14px; }
+#remotebar button:hover:not(:disabled) { background: #22303f; }
+#remotebar button:disabled { opacity: .35; cursor: default; }
+#remotebar .follow { display: flex; align-items: center; gap: 6px; cursor: pointer; margin-left: 6px; }
+#remotebar .follow input { accent-color: #d08a3a; width: 16px; height: 16px; }
+@media (max-width: 640px) { #remotebar .sub { display: none; } }
+#setextra .remotelink { display: block; margin-top: .7em; color: #f0b060; text-decoration: none; }
+#setextra .remotelink:hover { text-decoration: underline; }
 
 /* ---- piMap's edge flyouts: settings (left), satellites (right). Never on the TV. ---- */
 .flyout { position: absolute; top: calc(var(--H) * .1); bottom: calc(var(--H) * .3); width: calc(var(--H) * 2.6);

@@ -45,6 +45,14 @@ class TvView(unittest.TestCase):
         self.assertEqual(server.save_tv_zoom(999), hi)
         self.assertEqual(server.save_tv_zoom(0.01), lo)
 
+    def test_view_file(self):
+        v = server.save_tv_view({"zoom": 3, "lon": 12.5, "lat": 41.9, "follow": False})
+        self.assertEqual((v["lon"], v["lat"], v["follow"]), (12.5, 41.9, False))
+        self.assertEqual(server.load_tv_view(), v)
+        self.assertTrue(server._clean_view({"zoom": 2, "follow": False})["follow"])   # no spot: home
+        self.assertEqual(server._clean_view({"zoom": "nan"})["zoom"], server.zoom_limits()[0])
+        server.save_tv_view({"zoom": 1})
+
 
 class Api(unittest.TestCase):
     @classmethod
@@ -63,10 +71,42 @@ class Api(unittest.TestCase):
         self.assertIn("lat", r["home"])
 
     def test_tv_view_post(self):
+        self.c.post("/api/tv-view", json={"follow": True})
         self.assertEqual(self.c.post("/api/tv-view", json={"zoom": 3}).json()["zoom"], 3.0)
         self.assertEqual(self.c.post("/api/tv-view", json={"zoom": "nan"}).status_code, 400)
         self.assertEqual(self.c.post("/api/tv-view", json={"x": 1}).status_code, 400)
-        self.assertEqual(self.c.get("/api/tv-view").json()["zoom"], 3.0)
+        self.assertEqual(self.c.post("/api/tv-view", json=[1]).status_code, 400)
+        d = self.c.get("/api/tv-view").json()
+        self.assertEqual((d["zoom"], d["follow"]), (3.0, True))
+        self.assertEqual(d["centre"], {"lon": server.home.now()["lon"], "lat": server.home.now()["lat"]})
+
+    def test_tv_pan_and_home(self):
+        """The remote: a pan stops following GPS; follow puts the TV back on home."""
+        d = self.c.post("/api/tv-view", json={"zoom": 4, "lon": 10.0, "lat": 50.0}).json()
+        self.assertEqual((d["follow"], d["centre"]), (False, {"lon": 10.0, "lat": 50.0}))
+        self.assertFalse(server.load_tv_view()["follow"])                      # saved
+        self.assertEqual(self.c.get("/api/state").json()["tv"]["centre"]["lon"], 10.0)
+        d = self.c.post("/api/tv-view", json={"follow": True}).json()
+        self.assertTrue(d["follow"])
+        self.assertEqual(d["centre"]["lat"], server.home.now()["lat"])
+        self.assertEqual(d["zoom"], 4.0)
+        self.c.post("/api/tv-view", json={"zoom": 1})
+
+    def test_tv_screen(self):
+        self.assertTrue(self.c.post("/api/tv-screen", json={"w": 3840, "h": 2160}).json()["ok"])
+        self.assertEqual(self.c.get("/api/tv-view").json()["screen"], {"w": 3840, "h": 2160})
+        self.assertEqual(self.c.post("/api/tv-screen", json={"w": 5, "h": 2160}).status_code, 400)
+
+    def test_remote_page(self):
+        """The remote's port opens on the remote; the normal port on the map."""
+        self.assertNotIn('class="remote"', self.c.get("/").text)
+        old = server.REMOTE_PORT
+        server.REMOTE_PORT = 8001
+        try:
+            remote = TestClient(server.app, base_url="http://testserver:8001")
+            self.assertIn('<html lang="en" class="remote">', remote.get("/").text)
+        finally:
+            server.REMOTE_PORT = old
 
     def test_tiles_guarded(self):
         for bad in ("/tiles/0/..%2F..%2Fconfig.py", "/tiles/0/x.png", "/tiles/99/0_0.jpg"):

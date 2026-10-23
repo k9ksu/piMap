@@ -10,7 +10,8 @@ over as small JSON:
   GET  /api/state            home, TV view, space weather, status tags (polled ~5 s)
   GET  /api/tles             the amateur TLE set (Celestrak, cached 6 h, as piMap)
   GET  /tiles/{z}/{x}_{y}.jpg   the pyramid (tools/build_pyramid.py), cached forever
-  GET/POST /api/tv-view      the zoom the TV shows, centred on home
+  GET/POST /api/tv-view      what the TV shows: zoom, and centred on home (follow) or a spot
+  POST /api/tv-screen        the TV reports its size, so the remote shows its exact picture
 
 Home is HOME_LAT/HOME_LON from config.py, unless a GPS fix arrives: on FieldLab from
 MQTT (PIMAP_MQTT_HOST, topic fieldlab/location). Everything else is the same
@@ -20,6 +21,9 @@ On the FieldLab kiosk it also answers the kiosk's page contract (/_fieldlab/stat
 /_fieldlab/meta), so the kiosk can show and supervise it like any other page.
 
     python3 -m pimap2.server            (PORT, default 8090)
+
+PIMAP_REMOTE_PORT adds a second port that opens straight on the TV remote: a live mirror
+of the TV that you drag and zoom to set what the TV shows (also at /?mode=remote).
 """
 
 from __future__ import annotations
@@ -63,6 +67,11 @@ PYRAMID = Path(ROOT) / "data" / "pyramid"
 DATA_DIR = Path(os.environ.get("PIMAP_DATA_DIR", os.path.join(ROOT, "data")))
 VIEW_FILE = DATA_DIR / "tv_view.json"
 KIOSK = os.environ.get("PIMAP_KIOSK", "0") == "1"
+# The TV remote: a second port that serves the map in remote mode at "/". REMOTE_PORT is
+# the one this process listens on; REMOTE_PUBLIC_PORT is how browsers reach it (Docker
+# may map it), for the link in the settings panel.
+REMOTE_PORT = int(os.environ.get("PIMAP_REMOTE_PORT", "0") or 0)
+REMOTE_PUBLIC_PORT = int(os.environ.get("PIMAP_REMOTE_PUBLIC_PORT", "0") or 0) or (REMOTE_PORT or None)
 PAGE_ID = os.environ.get("PIMAP_PAGE_ID", "pimap")          # the kiosk's name for this page
 PAGE_TITLE = os.environ.get("PIMAP_PAGE_TITLE", "piMap")
 GPS_MAX_AGE_S = 6 * 3600
@@ -155,26 +164,48 @@ def zoom_limits() -> tuple[float, float]:
     return float(get(cfg, "MIN_ZOOM", 1.0)), float(get(cfg, "MAX_ZOOM", 8.0))
 
 
-def load_tv_zoom() -> float:
+def _clean_view(d: dict) -> dict:
+    """{zoom, lon, lat, follow}: lon/lat only matter when follow is off (a panned TV)."""
     lo, hi = zoom_limits()
+    z = float(d.get("zoom", lo))
+    out = {"zoom": round(min(max(z if math.isfinite(z) else lo, lo), hi), 3), "follow": bool(d.get("follow", True)),
+           "lon": None, "lat": None}
     try:
-        z = float(json.loads(VIEW_FILE.read_text())["zoom"])
-    except (OSError, ValueError, KeyError, TypeError):
-        return lo
-    return min(max(z, lo), hi)
+        lon, lat = float(d["lon"]), float(d["lat"])
+        if math.isfinite(lon) and math.isfinite(lat):
+            out["lon"], out["lat"] = round(min(max(lon, -180.0), 180.0), 4), round(min(max(lat, -90.0), 90.0), 4)
+    except (KeyError, TypeError, ValueError):
+        pass
+    if out["lon"] is None:
+        out["follow"] = True                      # nowhere else to be: centred on home
+    return out
 
 
-def save_tv_zoom(z: float) -> float:
-    lo, hi = zoom_limits()
-    z = round(min(max(float(z), lo), hi), 3)
+def load_tv_view() -> dict:
+    try:
+        return _clean_view(json.loads(VIEW_FILE.read_text()))
+    except (OSError, ValueError, TypeError, AttributeError):
+        return _clean_view({})
+
+
+def save_tv_view(d: dict) -> dict:
+    v = _clean_view(d)
     try:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         tmp = VIEW_FILE.with_suffix(".tmp")
-        tmp.write_text(json.dumps({"zoom": z}))
+        tmp.write_text(json.dumps(v))
         tmp.replace(VIEW_FILE)
     except OSError as e:
         log.warning("can't save the TV view: %s", e)
-    return z
+    return v
+
+
+def load_tv_zoom() -> float:
+    return load_tv_view()["zoom"]
+
+
+def save_tv_zoom(z: float) -> float:
+    return save_tv_view({**load_tv_view(), "zoom": z})["zoom"]
 
 
 TV_SETTINGS_FILE = DATA_DIR / "tv_settings.json"
@@ -203,7 +234,17 @@ def save_tv_settings(st: dict) -> None:
         log.warning("can't save the TV settings: %s", e)
 
 
-tv = {"zoom": load_tv_zoom(), "settings": load_tv_settings(), "changed": time.time()}
+tv = {**load_tv_view(), "settings": load_tv_settings(), "changed": time.time(),
+      "screen": {"w": 1920, "h": 1080}}          # the TV's size, as the TV reports it (16:9 until then)
+
+
+def tv_snapshot() -> dict:
+    """The TV view for browsers: where it's centred now (home while following GPS)."""
+    h = home.now()
+    follow = tv["follow"] or tv["lon"] is None
+    centre = {"lon": h["lon"], "lat": h["lat"]} if follow else {"lon": tv["lon"], "lat": tv["lat"]}
+    return {"zoom": tv["zoom"], "follow": follow, "centre": centre, "settings": tv["settings"],
+            "changed": tv["changed"], "screen": tv["screen"]}
 
 
 # ---- background: keep piMap's sources fresh -----------------------------------------
@@ -581,7 +622,8 @@ def public_config() -> dict:
         "targets": {"wspr_on": WSPR_ON, "ft8_on": FT8_ON, "modes": wspr_monitor.modes(), "sounds": SOUNDS,
                     "radius": c("TARGET_DOT_RADIUS", 7), "ping_s": c("WSPR_ALERT_HIGHLIGHT_SECONDS", 60),
                     "volume": c("ALERT_VOLUME", 0.8), "sound_on": bool(c("ALERT_SOUND_ENABLED", True))},
-        "kiosk": KIOSK,                 # the FieldLab kiosk: browsers get the TV view panel
+        "kiosk": KIOSK,                 # the FieldLab kiosk: browsers get the TV column and the remote
+        "remote_port": REMOTE_PUBLIC_PORT,   # where the TV remote is (the kiosk: 8081), or null
     }
 
 
@@ -611,7 +653,11 @@ NO_STORE = {"Cache-Control": "no-store"}
 
 
 @app.get("/")
-def index():
+def index(request: Request):
+    server = request.scope.get("server") or ("", 0)
+    if REMOTE_PORT and server[1] == REMOTE_PORT:              # the TV remote's port
+        page = (WEB / "index.html").read_text(encoding="utf-8").replace('<html lang="en">', '<html lang="en" class="remote">', 1)
+        return Response(page, media_type="text/html", headers={"Cache-Control": "no-cache"})
     return FileResponse(WEB / "index.html", headers={"Cache-Control": "no-cache"})
 
 
@@ -623,7 +669,7 @@ def api_config():
 @app.get("/api/state")
 def api_state():
     return JSONResponse({"home": home.now(),
-                         "tv": {"zoom": tv["zoom"], "settings": tv["settings"], "changed": tv["changed"]},
+                         "tv": tv_snapshot(),
                          "space_weather": space_wx(), "status": status_tags(),
                          "tle_version": worker.tle_version,
                          "sats": {"shown": choice.shown, "version": choice.version},
@@ -753,7 +799,7 @@ async def set_sat(request: Request):
 @app.get("/api/tv-view")
 def get_tv_view():
     lo, hi = zoom_limits()
-    return JSONResponse({"zoom": tv["zoom"], "min": lo, "max": hi, "centre": home.now()}, headers=NO_STORE)
+    return JSONResponse({**tv_snapshot(), "min": lo, "max": hi}, headers=NO_STORE)
 
 
 @app.post("/api/tv-settings")
@@ -775,15 +821,45 @@ async def set_tv_settings(request: Request):
 
 @app.post("/api/tv-view")
 async def set_tv_view(request: Request):
+    """{zoom} and/or {lon, lat} (a pan: stops following GPS) and/or {follow: true} (back to home)."""
     try:
         body = await request.json()
-        z = float(body["zoom"])
-        if not math.isfinite(z):
+        if not isinstance(body, dict):
+            raise TypeError
+        new = {"zoom": tv["zoom"], "follow": tv["follow"], "lon": tv["lon"], "lat": tv["lat"]}
+        if "zoom" in body:
+            z = float(body["zoom"])
+            if not math.isfinite(z):
+                raise ValueError
+            new["zoom"] = z
+        if "lon" in body or "lat" in body:
+            lon, lat = float(body["lon"]), float(body["lat"])
+            if not (math.isfinite(lon) and math.isfinite(lat)):
+                raise ValueError
+            new.update(lon=lon, lat=lat, follow=False)
+        if "follow" in body:
+            new["follow"] = bool(body["follow"])
+        if not ({"zoom", "lon", "lat", "follow"} & set(body)):
+            raise KeyError
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return JSONResponse({"ok": False, "error": "expected {zoom}, {lon, lat} and/or {follow}"}, status_code=400)
+    tv.update(save_tv_view(new))
+    tv["changed"] = time.time()
+    return {"ok": True, **tv_snapshot()}
+
+
+@app.post("/api/tv-screen")
+async def set_tv_screen(request: Request):
+    """The TV says how big it is, so the remote can show exactly its picture."""
+    try:
+        body = await request.json()
+        w, h = int(body["w"]), int(body["h"])
+        if not (200 <= w <= 16384 and 200 <= h <= 16384):
             raise ValueError
     except (ValueError, KeyError, TypeError, AttributeError):
-        return JSONResponse({"ok": False, "error": "expected {zoom: number}"}, status_code=400)
-    tv["zoom"], tv["changed"] = save_tv_zoom(z), time.time()
-    return {"ok": True, "zoom": tv["zoom"]}
+        return JSONResponse({"ok": False, "error": "expected {w, h}"}, status_code=400)
+    tv["screen"] = {"w": w, "h": h}
+    return {"ok": True}
 
 
 _TILE_HEADERS = {"Cache-Control": "public, max-age=31536000, immutable"}
@@ -858,8 +934,19 @@ def main() -> None:
     import uvicorn
     logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"),
                         format="%(asctime)s %(name)s %(levelname)s %(message)s")
-    uvicorn.run(app, host=os.environ.get("HOST", "0.0.0.0"), port=int(os.environ.get("PORT", "8090")),
-                log_level="warning")
+    host, port = os.environ.get("HOST", "0.0.0.0"), int(os.environ.get("PORT", "8090"))
+    if not REMOTE_PORT:
+        uvicorn.run(app, host=host, port=port, log_level="warning")
+        return
+    # Same app on two ports; only the first runs the startup (MQTT, the refresh worker).
+    import asyncio
+    main_srv = uvicorn.Server(uvicorn.Config(app, host=host, port=port, log_level="warning"))
+    remote_srv = uvicorn.Server(uvicorn.Config(app, host=host, port=REMOTE_PORT, log_level="warning", lifespan="off"))
+    log.info("TV remote on port %s", REMOTE_PORT)
+
+    async def both():
+        await asyncio.gather(main_srv.serve(), remote_srv.serve())
+    asyncio.run(both())
 
 
 if __name__ == "__main__":
