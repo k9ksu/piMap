@@ -76,6 +76,14 @@ class Api(unittest.TestCase):
             self.assertEqual((r.status_code, r.headers["content-type"]), (200, "image/jpeg"))
             self.assertIn("immutable", r.headers["cache-control"])
 
+    def test_boundaries(self):
+        r = self.c.get("/api/boundaries", headers={"accept-encoding": "gzip"})
+        lines = r.json()["lines"]
+        self.assertGreater(len(lines), 1000)                        # countries, states, coasts
+        self.assertTrue(all(len(f) % 2 == 0 for f in lines))        # flat lon, lat pairs
+        lon, lat = lines[0][0], lines[0][1]
+        self.assertTrue(-180 <= lon <= 180 and -90 <= lat <= 90)
+
     def test_kiosk_contract(self):
         st = self.c.get("/_fieldlab/status").json()
         self.assertIn(st["state"], ("ready", "degraded", "error"))

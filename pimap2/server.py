@@ -34,6 +34,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, Request
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
@@ -42,6 +43,7 @@ from .settings import ROOT, get, load_config
 cfg, CONFIG_SOURCE = load_config()
 
 import applog          # noqa: E402  (piMap's modules import config; it's registered above)
+import geo_boundaries  # noqa: E402
 import sat_tracker     # noqa: E402
 import space_weather   # noqa: E402
 
@@ -230,13 +232,35 @@ def public_config() -> dict:
                 "shadow_alpha": c("ISS_ICON_SHADOW_ALPHA", 0.1), "shadow_gray": c("ISS_ICON_SHADOW_GRAY", 0.5)},
         "sats": {"dot_radius": c("SAT_DOT_RADIUS", 6), "show": list(c("SATS_SHOWN", [25544])),
                  "footprint": bool(c("SAT_FOOTPRINT", True))},
+        "boundaries": {"enabled": bool(c("BOUNDARY_ENABLE", True)), "min_zoom": c("BOUNDARY_MIN_ZOOM", 2.5),
+                       "color": c("BOUNDARY_COLOR", "#8FA3B8"), "alpha": c("BOUNDARY_ALPHA", 0.55)},
         "pyramid": pyramid,
         "kiosk": KIOSK,                 # the FieldLab kiosk: browsers get the TV view panel
     }
 
 
+_boundaries: bytes | None = None
+
+
+def boundaries_json() -> bytes:
+    """Country, state/province and coastline lines, as piMap draws them (geo_boundaries,
+    same settings), flattened to [lon, lat, lon, lat, ...] per line. Built once."""
+    global _boundaries
+    if _boundaries is None:
+        lines = []
+        if get(cfg, "BOUNDARY_ENABLE", True):
+            for pts, _bbox in geo_boundaries.load(
+                    state_countries=tuple(get(cfg, "BOUNDARY_STATES_COUNTRIES", ["USA"])),
+                    smooth_iters=int(get(cfg, "BOUNDARY_SMOOTH", 0)),
+                    coastline=bool(get(cfg, "BOUNDARY_COASTLINE", True))):
+                lines.append([round(v, 4) for lat, lon in pts for v in (lon, lat)])
+        _boundaries = json.dumps({"lines": lines}, separators=(",", ":")).encode()
+    return _boundaries
+
+
 # ---- the app ------------------------------------------------------------------------
 app = FastAPI(title="piMap 2.0", docs_url=None, redoc_url=None)
+app.add_middleware(GZipMiddleware, minimum_size=2048)
 NO_STORE = {"Cache-Control": "no-store"}
 
 
@@ -265,6 +289,12 @@ def api_tles():
                          "sats": [{"norad": n, "name": t[0], "l1": t[1], "l2": t[2]}
                                   for n, t in sorted(tles.items())]},
                         headers={"Cache-Control": "no-cache"})
+
+
+@app.get("/api/boundaries")
+def api_boundaries():
+    return Response(boundaries_json(), media_type="application/json",
+                    headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/api/tv-view")

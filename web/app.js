@@ -1,6 +1,6 @@
 // piMap 2.0: the map, drawn in the browser.
 //
-//   base canvas    Blue Marble pyramid + night side; redrawn only when the view moves,
+//   base canvas    Blue Marble pyramid, night side, borders; redrawn only when the view moves,
 //                  a tile arrives, or the grey line advances (every 20 s)
 //   overlay canvas QTH, satellites, scale bar; redrawn when the view moves, or as often
 //                  as the fastest satellite needs to move a fifth of a pixel (glide)
@@ -14,13 +14,14 @@ import { View } from "./view.js";
 import { Tiles } from "./tiles.js";
 import { Night, subsolar, sunElevation } from "./sky.js";
 import { Sats } from "./sats.js";
+import { Borders } from "./borders.js";
 
 const TV = document.documentElement.classList.contains("tv");
 const $ = (id) => document.getElementById(id);
 const base = $("base"), over = $("over");
 const bctx = base.getContext("2d", { alpha: false }), octx = over.getContext("2d");
 
-let conf = null, view = null, tiles = null, night = null, sats = null;
+let conf = null, view = null, tiles = null, night = null, sats = null, borders = null;
 let state = null, home = null, dpr = 1, u = 1;
 let baseDirty = true, overAt = 0, tleVersion = -1, tvSeen = null;
 let speed = 0, speedAt = 0;          // fastest satellite, device px/s (checked once a second)
@@ -47,6 +48,10 @@ async function start() {
   view = new View(conf.map.min_zoom, conf.map.max_zoom);
   tiles = new Tiles(conf.pyramid, { maxTiles: TV ? 140 : 180, onLoad: () => { baseDirty = true; } });
   night = conf.map.greyline ? new Night(conf.map.night_alpha) : null;
+  borders = new Borders(conf.boundaries || { enabled: false });
+  if (borders.conf.enabled) {
+    getJSON("api/boundaries").then((d) => { borders.load(d.lines); baseDirty = true; }).catch(() => {});
+  }
   const iss = new Image(); iss.src = "iss.webp"; iss.onload = () => { overAt = 0; };
   sats = new Sats({ ...conf.sats, iss_width: conf.iss.width, iss_shadow: conf.iss.shadow,
                     iss_shadow_alpha: conf.iss.shadow_alpha, iss_shadow_gray: conf.iss.shadow_gray,
@@ -165,6 +170,7 @@ function drawBase() {
   tiles.draw(bctx, view, dpr);
   brighten(bctx, conf.map.brightness);
   if (night) night.draw(bctx, view, dpr);
+  borders.draw(bctx, view, dpr, u);
   $("note").hidden = true;
 }
 
