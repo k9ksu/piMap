@@ -1,7 +1,8 @@
 // piMap 2.0: the map, drawn in the browser.
 //
-//   base canvas    Blue Marble pyramid, night side, borders; redrawn only when the view moves,
+//   base canvas    Blue Marble pyramid and night side; redrawn only when the view moves,
 //                  a tile arrives, or the grey line advances (every 20 s)
+//   lines canvas   borders (borders.js): CPU-drawn, slid with the map while it moves
 //   overlay canvas QTH, satellites, scale bar; redrawn when the view moves, or as often
 //                  as the fastest satellite needs to move a fifth of a pixel (glide)
 //   header         plain HTML text, crisp at any resolution
@@ -17,6 +18,9 @@ import { Sats } from "./sats.js";
 import { Borders } from "./borders.js";
 
 const TV = document.documentElement.classList.contains("tv");
+// ?debug=1&off=night,borders,sats,tiles,bright: switch layers off to find what's costly
+const QS = new URLSearchParams(location.search);
+const OFF = new Set(QS.get("debug") ? (QS.get("off") || "").split(",") : []);
 const $ = (id) => document.getElementById(id);
 const base = $("base"), over = $("over");
 const bctx = base.getContext("2d", { alpha: false }), octx = over.getContext("2d");
@@ -24,7 +28,7 @@ const bctx = base.getContext("2d", { alpha: false }), octx = over.getContext("2d
 let conf = null, view = null, tiles = null, night = null, sats = null, borders = null;
 let state = null, home = null, dpr = 1, u = 1;
 let baseDirty = true, overAt = 0, tleVersion = -1, tvSeen = null;
-let speed = 0, speedAt = 0;          // fastest satellite, device px/s (checked once a second)
+let speed = 0, speedAt = 0, changedAt = 0;          // fastest satellite, device px/s (checked once a second)
 
 // ---- start --------------------------------------------------------------------------
 async function getJSON(url, opts) {
@@ -48,7 +52,7 @@ async function start() {
   view = new View(conf.map.min_zoom, conf.map.max_zoom);
   tiles = new Tiles(conf.pyramid, { maxTiles: TV ? 140 : 180, onLoad: () => { baseDirty = true; } });
   night = conf.map.greyline ? new Night(conf.map.night_alpha) : null;
-  borders = new Borders(conf.boundaries || { enabled: false });
+  borders = new Borders(conf.boundaries || { enabled: false }, $("lines"));
   if (borders.conf.enabled) {
     getJSON("api/boundaries").then((d) => { borders.load(d.lines); baseDirty = true; }).catch(() => {});
   }
@@ -76,6 +80,7 @@ function resize() {
   for (const c of [base, over]) { c.width = Math.round(box.width * dpr); c.height = Math.round(box.height * dpr); }
   u = (window.innerHeight * dpr) / 1080;           // piMap's 1080p pixel, in device px
   if (view) view.resize(box.width, box.height);
+  if (borders) borders.resize(base.width, base.height);
   baseDirty = true; overAt = 0;
 }
 
@@ -153,7 +158,9 @@ function frame(t) {
   const moving = view.step(dt);
   if (night && night.update()) baseDirty = true;
   const viewMoved = view.changed;
+  if (viewMoved) changedAt = t;
   if (baseDirty || viewMoved || tiles.busy) drawBase();
+  if (!OFF.has("borders")) borders.update(view, dpr, u, t, moving || t - changedAt < 150);
   // satellites: redraw often enough that the fastest moves ~0.2 device px per redraw
   if (t - speedAt > 1000 || viewMoved) { speed = sats.count ? sats.speedPx(view, dpr) : 0; speedAt = t; }
   const every = speed > 0 ? Math.min(1000, Math.max(16, 200 / speed)) : 1000;
@@ -167,10 +174,9 @@ function drawBase() {
   bctx.setTransform(1, 0, 0, 1, 0, 0);
   bctx.fillStyle = "#000"; bctx.fillRect(0, 0, base.width, base.height);
   bctx.imageSmoothingEnabled = true; bctx.imageSmoothingQuality = "high";
-  tiles.draw(bctx, view, dpr);
-  brighten(bctx, conf.map.brightness);
-  if (night) night.draw(bctx, view, dpr);
-  borders.draw(bctx, view, dpr, u);
+  if (!OFF.has("tiles")) tiles.draw(bctx, view, dpr);
+  if (!OFF.has("bright")) brighten(bctx, conf.map.brightness);
+  if (night && !OFF.has("night")) night.draw(bctx, view, dpr);
   $("note").hidden = true;
 }
 
@@ -206,7 +212,7 @@ function drawOver(t) {
   octx.save();                                  // keep satellite drawings on the world
   const L = view.x(-180) * dpr, T = view.y(90) * dpr;
   octx.beginPath(); octx.rect(L, T, view.x(180) * dpr - L, view.y(-90) * dpr - T); octx.clip();
-  sats.draw(octx, view, dpr, u);
+  if (!OFF.has("sats")) sats.draw(octx, view, dpr, u);
   octx.restore();
   scaleBar();
 }

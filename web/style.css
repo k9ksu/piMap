@@ -44,7 +44,8 @@ html.tv, html.tv body { cursor: none; }
 
 /* ---- map ---------------------------------------------------------------------------- */
 #mapbox { flex: 1; position: relative; overflow: hidden; background: #000; }
-#base, #over { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+#base, #lines, #over { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+#lines { pointer-events: none; will-change: transform; }
 #over { touch-action: none; }
 html:not(.tv) #over { cursor: grab; }
 html:not(.tv) #over.dragging { cursor: grabbing; }
