@@ -106,7 +106,8 @@ Phase 1 is the map, grey line, borders, header, satellites and mouse zoom/pan, w
 piMap's edge flyouts: **right edge** the satellite list (ISS first, then by next pass
 over home, tick to show; the choice is saved on the server so every screen shows the
 same set, starting from `SATS_SHOWN`), **left edge** display settings (night shading,
-borders, tracks, footprints; per browser). Touch screens get edge tabs instead of hover.
+borders, tracks, footprints; per browser, and on the FieldLab kiosk a second "TV"
+column that sets what the TV draws). Touch screens get edge tabs instead of hover.
 Coming: QSO paths (phase 2); target dots, propagation, sound and spot mode (phase 3).
 
 **On the shack Pi** (switches HDMI-2 from the pygame map; `./install2.sh --back` undoes it):

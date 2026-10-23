@@ -103,6 +103,16 @@ class Api(unittest.TestCase):
         self.assertEqual([v["label"] for v in st.values()], ["TLE", "SWX", "QRZ", "FRQ", "WSP"])
         self.assertEqual(st["qrz"]["state"], "off")                 # not running in piMap 2.0 yet
 
+    def test_tv_settings(self):
+        st = self.c.get("/api/state").json()["tv"]["settings"]
+        self.assertEqual(set(st), set(server.TV_SETTING_KEYS))
+        r = self.c.post("/api/tv-settings", json={"key": "borders", "on": False}).json()
+        self.assertFalse(r["settings"]["borders"])
+        self.assertFalse(server.load_tv_settings()["borders"])           # saved
+        self.assertFalse(self.c.get("/api/state").json()["tv"]["settings"]["borders"])
+        self.assertEqual(self.c.post("/api/tv-settings", json={"key": "nope", "on": True}).status_code, 400)
+        self.c.post("/api/tv-settings", json={"key": "borders", "on": True})
+
     def test_kiosk_contract(self):
         st = self.c.get("/_fieldlab/status").json()
         self.assertIn(st["state"], ("ready", "degraded", "error"))

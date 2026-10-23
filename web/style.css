@@ -105,3 +105,9 @@ html.tv .flyout, html.tv .edgetab { display: none; }
 #bubble .title { color: #fff; font-weight: 700; margin-bottom: .15em; }
 #bubble .live { color: var(--dim); margin-top: .2em; }
 html.tv #bubble { display: none; }
+
+/* settings: "Me" and "TV" columns on the kiosk */
+#setlist .row.head { cursor: default; color: var(--dim); font-size: .85em; padding-bottom: 0; }
+#setlist .row.head:hover { background: none; }
+#setlist.two .row .col { width: 1.05em; text-align: center; flex: none; }
+#setlist .tvbox { accent-color: #d08a3a; }

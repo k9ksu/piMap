@@ -170,7 +170,32 @@ def save_tv_zoom(z: float) -> float:
     return z
 
 
-tv = {"zoom": load_tv_zoom(), "changed": time.time()}
+TV_SETTINGS_FILE = DATA_DIR / "tv_settings.json"
+TV_SETTING_KEYS = ("night", "borders", "tracks", "footprints")
+
+
+def load_tv_settings() -> dict:
+    """What the TV draws (the left menu's TV column): all on unless saved otherwise."""
+    out = {k: True for k in TV_SETTING_KEYS}
+    try:
+        saved = json.loads(TV_SETTINGS_FILE.read_text())
+        out.update({k: bool(saved[k]) for k in TV_SETTING_KEYS if k in saved})
+    except (OSError, ValueError, TypeError):
+        pass
+    return out
+
+
+def save_tv_settings(st: dict) -> None:
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = TV_SETTINGS_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(st))
+        tmp.replace(TV_SETTINGS_FILE)
+    except OSError as e:
+        log.warning("can't save the TV settings: %s", e)
+
+
+tv = {"zoom": load_tv_zoom(), "settings": load_tv_settings(), "changed": time.time()}
 
 
 # ---- background: keep piMap's sources fresh -----------------------------------------
@@ -344,7 +369,8 @@ def api_config():
 
 @app.get("/api/state")
 def api_state():
-    return JSONResponse({"home": home.now(), "tv": {"zoom": tv["zoom"], "changed": tv["changed"]},
+    return JSONResponse({"home": home.now(),
+                         "tv": {"zoom": tv["zoom"], "settings": tv["settings"], "changed": tv["changed"]},
                          "space_weather": space_wx(), "status": status_tags(),
                          "tle_version": worker.tle_version,
                          "sats": {"shown": choice.shown, "version": choice.version}, "now": time.time()},
@@ -402,6 +428,23 @@ async def set_sat(request: Request):
 def get_tv_view():
     lo, hi = zoom_limits()
     return JSONResponse({"zoom": tv["zoom"], "min": lo, "max": hi, "centre": home.now()}, headers=NO_STORE)
+
+
+@app.post("/api/tv-settings")
+async def set_tv_settings(request: Request):
+    """{key: "borders", on: false}: what the kiosk TV draws."""
+    try:
+        body = await request.json()
+        key, on = str(body["key"]), bool(body["on"])
+        if key not in TV_SETTING_KEYS:
+            raise ValueError(key)
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return JSONResponse({"ok": False, "error": f"expected {{key: one of {list(TV_SETTING_KEYS)}, on: bool}}"},
+                            status_code=400)
+    tv["settings"] = {**tv["settings"], key: on}
+    tv["changed"] = time.time()
+    save_tv_settings(tv["settings"])
+    return {"ok": True, "settings": tv["settings"]}
 
 
 @app.post("/api/tv-view")

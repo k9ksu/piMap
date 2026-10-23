@@ -47,7 +47,7 @@ class Flyout {
   }
 }
 
-export function setupPanels({ sats, settings, onSettings, serverNow, onToggleSat }) {
+export function setupPanels({ sats, settings, onSettings, serverNow, onToggleSat, tv = null }) {
   const left = new Flyout(document.getElementById("setpanel"), "left", document.getElementById("settab"));
   const right = new Flyout(document.getElementById("satpanel"), "right", document.getElementById("sattab"));
   let lastMove = performance.now();
@@ -68,7 +68,8 @@ export function setupPanels({ sats, settings, onSettings, serverNow, onToggleSat
   }, 200);
   document.addEventListener("keydown", (e) => { if (e.key === "Escape") { left.set(false); right.set(false); } });
 
-  // ---- settings (left) ----
+  // ---- settings (left): yours, and on the kiosk the TV's too ----
+  // tv: null at the shack; on the kiosk {get: () => settings, set: async (key, on) => ok}
   const box = document.getElementById("setlist");
   const items = [
     ["night", "Night shading (grey line)"],
@@ -76,15 +77,44 @@ export function setupPanels({ sats, settings, onSettings, serverNow, onToggleSat
     ["tracks", "Satellite tracks"],
     ["footprints", "Satellite footprints"],
   ];
+  const tvBoxes = new Map();
   box.textContent = "";
+  box.classList.toggle("two", !!tv);
+  if (tv) {
+    const head = document.createElement("div");
+    head.className = "row head";
+    head.innerHTML = '<span class="col">Me</span><span class="col">TV</span><span></span>';
+    box.appendChild(head);
+  }
   for (const [key, label] of items) {
-    const row = document.createElement("label");
+    const row = document.createElement("div");
     row.className = "row";
-    const cb = document.createElement("input");
-    cb.type = "checkbox"; cb.checked = !!settings[key];
-    cb.addEventListener("change", () => { settings[key] = cb.checked; saveSettings(settings); onSettings(settings); });
-    const t = document.createElement("span"); t.textContent = label;
-    row.append(cb, t); box.appendChild(row);
+    const mine = document.createElement("input");
+    mine.type = "checkbox"; mine.checked = !!settings[key];
+    mine.title = "This browser";
+    mine.addEventListener("change", () => { settings[key] = mine.checked; saveSettings(settings); onSettings(settings); });
+    row.appendChild(mine);
+    if (tv) {
+      const t = document.createElement("input");
+      t.type = "checkbox"; t.checked = !!(tv.get() || {})[key];
+      t.title = "The TV in the trailer";
+      t.className = "tvbox";
+      t.addEventListener("change", async () => {
+        t.disabled = true;
+        if (!(await tv.set(key, t.checked))) t.checked = !t.checked;
+        t.disabled = false;
+      });
+      tvBoxes.set(key, t);
+      row.appendChild(t);
+    }
+    const name = document.createElement("span"); name.textContent = label;
+    name.addEventListener("click", () => mine.click());
+    row.appendChild(name);
+    box.appendChild(row);
+  }
+  /** Keep the TV column in step with the server (another browser may change it). */
+  function syncTv(st) {
+    for (const [key, t] of tvBoxes) if (!t.disabled) t.checked = !!(st || {})[key];
   }
 
   // ---- satellites (right) ----
@@ -136,5 +166,5 @@ export function setupPanels({ sats, settings, onSettings, serverNow, onToggleSat
   setInterval(() => { if (right.open) tick(); }, 1000);
   setInterval(() => { if (right.open) refresh(); }, 60000);
 
-  return { refresh };          // the list is rebuilt each time the panel opens
+  return { refresh, syncTv };  // the satellite list is rebuilt each time its panel opens
 }

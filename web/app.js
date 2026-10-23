@@ -31,7 +31,7 @@ let state = null, home = null, dpr = 1, u = 1;
 let baseDirty = true, overAt = 0, tleVersion = -1, tvSeen = null;
 let speed = 0, speedAt = 0, changedAt = 0;
 let settings = { ...DEFAULT_SETTINGS }, satsVersion = -1, clockSkew = 0;
-let pointer = null, pinned = null;   // pointer over the map (CSS px); the pinned bubble's NORAD
+let pointer = null, pinned = null, panels = null, tvSettingsKey = "";   // pointer over the map (CSS px); the pinned bubble's NORAD
 const radio = new Map();             // NORAD -> {lines, note, next_pass, at}          // fastest satellite, device px/s (checked once a second)
 
 // ---- start --------------------------------------------------------------------------
@@ -71,11 +71,12 @@ async function start() {
     wireInput();
     settings = loadSettings();
     applySettings(settings);
-    setupPanels({ sats, settings, onSettings: applySettings, onToggleSat: toggleSat,
-                  serverNow: () => (Date.now() + clockSkew) / 1000 });
+    panels = setupPanels({ sats, settings, onSettings: applySettings, onToggleSat: toggleSat,
+                  serverNow: () => (Date.now() + clockSkew) / 1000,
+                  tv: conf.kiosk ? { get: () => state && state.tv.settings, set: setTvSetting } : null });
   }
   if (!TV && conf.kiosk) wireTvPanel();
-  if (QS.get("debug")) window.__pimap = { view, sats, tiles };       // for measuring and tests
+  if (QS.get("debug")) window.__pimap = { view, sats, tiles, borders, get settings() { return settings; } };   // for measuring and tests
   await poll();
   setInterval(poll, 5000);
   setInterval(clock, 250);
@@ -108,7 +109,14 @@ async function poll() {
     try { const t = await getJSON("api/tles"); sats.setTles(t.sats); tleVersion = t.version; overAt = 0; }
     catch (e) { /* next poll */ }
   }
-  const tvKey = `${state.tv.changed}|${h.lat}|${h.lon}`;
+  // the TV draws what the left menu's TV column says; browsers keep their own
+  const tvs = JSON.stringify(state.tv.settings || {});
+  if (tvs !== tvSettingsKey) {
+    tvSettingsKey = tvs;
+    if (TV) { settings = { ...DEFAULT_SETTINGS, ...state.tv.settings }; applySettings(settings); }
+    else if (panels) panels.syncTv(state.tv.settings);
+  }
+  const tvKey = `${state.tv.zoom}|${h.lat}|${h.lon}`;
   if (tvSeen === null) {
     view.set(state.tv.zoom, h.lon, h.lat);          // everyone opens on the TV view
   } else if (TV && (tvKey !== tvSeen || moved)) {
@@ -403,6 +411,15 @@ function applySettings(st) {
   sats.tracks = st.tracks;
   sats.footprints = st.footprints && conf.sats.footprint !== false;
   baseDirty = true; overAt = 0;
+}
+
+async function setTvSetting(key, on) {
+  try {
+    const r = await getJSON("api/tv-settings", { method: "POST", headers: { "content-type": "application/json" },
+                                                 body: JSON.stringify({ key, on }) });
+    if (r.ok) state.tv.settings = r.settings;
+    return !!r.ok;
+  } catch (e) { return false; }
 }
 
 async function toggleSat(norad, on) {
