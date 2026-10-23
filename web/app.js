@@ -38,7 +38,7 @@ let bubbleHover = false, shownKey = null;
 const HOVER_GRACE_MS = 900;
 const LEAVE_GRACE_MS = 250;          // ...but leaving the bubble itself closes it almost at once
 const FADE_MS = 180;                 // the fade-out (matches #bubble's CSS transition)
-let fadeTimer = 0, fadeKey = null;
+let fadeTimer = 0, fadeKey = null, placedKey = null;
 const DWELL_MS = 400;                // the cursor rests this long on a dot before its bubble shows
 let dwell = null, dwellTimer = 0;
 let lastHover = null, graceTimer = 0;
@@ -344,6 +344,7 @@ function fadeBubble(el) {
     el.classList.remove("fading");
     el.hidden = true;
     el.dataset.key = "";                                          // refilled fresh next time
+    placedKey = null;                                             // and placed fresh
     el.style.minWidth = el.style.minHeight = "";
   }, FADE_MS);
 }
@@ -416,13 +417,24 @@ function bubble() {
   }
   el.hidden = false;
   if (bubbleHover) return;                                       // don't move it out from under the mouse
+  // Placed once, where it first appears: a target or QSO bubble never jumps when its
+  // contents change or the mouse leaves it. Satellite bubbles follow their satellite.
+  if (placedKey === m.key && m.kind !== "sat") return;
+  placedKey = m.key;
   // piMap's placement: up and to the right of the dot, flipped to stay on screen
   const px = m.x / dpr, py = m.y / dpr, w = el.offsetWidth, h = el.offsetHeight;
   let bx = px + 14, by = py - h - 12;
   if (bx + w > view.w - 4) bx = px - w - 14;
-  if (by < 4) by = py + 14;
-  if (by + h > view.h - 4) by = Math.max(4, view.h - 4 - h);
-  el.style.left = `${Math.max(4, bx)}px`; el.style.top = `${by}px`;
+  el.style.left = `${Math.max(4, bx)}px`;
+  if (by >= 4) {
+    // Above the dot: anchored by its bottom edge, so if it grows it grows upward, away from the dot
+    const H = el.offsetParent ? el.offsetParent.clientHeight : view.h;
+    el.style.top = "auto"; el.style.bottom = `${H - (py - 12)}px`;
+  } else {
+    by = py + 14;                                                 // no room above: below the dot
+    if (by + h > view.h - 4) by = Math.max(4, view.h - 4 - h);
+    el.style.bottom = "auto"; el.style.top = `${by}px`;
+  }
 }
 
 const fmtSnr = (v) => (typeof v === "number" ? (v >= 0 ? `+${v}` : `${v}`) : "");
