@@ -1,4 +1,4 @@
-// piMap 2.0 browser maths: run with  node --test tests/
+// piMap 2.0 browser maths: run with  node --test tests/web.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { subsolar, sunElevation } from "../web/sky.js";
