@@ -45,6 +45,8 @@ cfg, CONFIG_SOURCE = load_config()
 import applog          # noqa: E402  (piMap's modules import config; it's registered above)
 import geo_boundaries  # noqa: E402
 import sat_radio       # noqa: E402
+import n3fjp_status    # noqa: E402
+import qrz_client      # noqa: E402
 import sat_tracker     # noqa: E402
 import space_weather   # noqa: E402
 
@@ -62,7 +64,7 @@ GPS_MAX_AGE_S = 6 * 3600
 # piMap's status row (overlays._STATUS_LABELS): component -> label. QRZ and WSPR aren't
 # running in piMap 2.0 yet (phases 2 and 3): they show grey, "off", not amber.
 STATUS_TAGS = {"tle": "TLE", "swx": "SWX", "qrz": "QRZ", "freq": "FRQ", "wspr": "WSP"}
-NOT_YET = {"qrz", "wspr"}
+NOT_YET = {"wspr"}
 
 
 # ---- home ---------------------------------------------------------------------------
@@ -171,7 +173,7 @@ def save_tv_zoom(z: float) -> float:
 
 
 TV_SETTINGS_FILE = DATA_DIR / "tv_settings.json"
-TV_SETTING_KEYS = ("night", "borders", "tracks", "footprints")
+TV_SETTING_KEYS = ("night", "borders", "qsos", "tracks", "footprints")
 
 
 def load_tv_settings() -> dict:
@@ -286,6 +288,87 @@ class Passes:
 passes = Passes()
 
 
+class Qsos:
+    """piMap's QRZ logbook loop (piMap.py main loop, same qrz_client): courteous polling
+    (STATUS as change detector, only the newest records fetched), session mode (only
+    the current run while you're logging, else the last QRZ_MAX_QSOS), an adaptive
+    cadence that speeds up mid-session, and the optional N3FJP "just logged" trigger."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.all: list[dict] = []          # every recent QSO with a usable grid
+        self.shown: list[dict] = []        # what's drawn: the session, or all
+        self.session = False
+        self.version = 0
+        self.enabled = bool(get(cfg, "QRZ_ENABLE", False))
+
+    def _refresh(self, home_ll) -> None:
+        records, err = qrz_client.fetch_recent_qsos()
+        if err:
+            applog.set_status("qrz", "failed", err)
+            log.warning("QRZ: %s", err)
+            return
+        qsos = qrz_client.make_qsos_from_qrz(records, home_ll)
+        self._apply(qsos)
+
+    def _apply(self, qsos: list[dict]) -> None:
+        shown, session = qrz_client.select_session_qsos(qsos, get(cfg, "QRZ_SESSION_WINDOW_MIN", 0))
+        with self.lock:
+            changed = [(q["title"], q["ts"]) for q in shown] != [(q["title"], q["ts"]) for q in self.shown] \
+                or session != self.session
+            self.all, self.shown, self.session = qsos, shown, session
+            if changed:
+                self.version += 1
+        applog.set_status("qrz", "ok", f"{len(shown)} QSOs ({'session' if session else 'recent'})")
+
+    def run(self) -> None:
+        if not self.enabled:
+            applog.set_status("qrz", "off", "QRZ_ENABLE is off")
+            return
+        n3fjp_status.start(get(cfg, "QRZ_N3FJP_HOST", "127.0.0.1"), get(cfg, "QRZ_N3FJP_PORT", 1100),
+                           get(cfg, "QRZ_N3FJP_TRIGGER_ENABLE", False))
+        applog.set_status("qrz", "loading", "")
+        window = get(cfg, "QRZ_SESSION_WINDOW_MIN", 0)
+        idle_s = float(get(cfg, "QRZ_REFRESH_SECONDS", 150))
+        floor_s = float(get(cfg, "QRZ_REFRESH_ACTIVE_MIN_SECONDS", idle_s))
+        last, last_home, last_trigger = 0.0, None, n3fjp_status.trigger_count()
+        while True:
+            h = home.now()
+            home_ll = (h["lat"], h["lon"])
+            with self.lock:
+                qsos = list(self.all)
+            interval = qrz_client.poll_interval(qsos, window, idle_s, floor_s)
+            ts = n3fjp_status.get().get("last_event_ts", 0.0)        # N3FJP: logging right now
+            if window and ts and time.time() - ts < window * 60:
+                frac = max(0.0, min(1.0, (time.time() - ts) / (window * 60)))
+                interval = min(interval, floor_s + (idle_s - floor_s) * frac)
+            trig = n3fjp_status.trigger_count()
+            try:
+                if time.time() - last >= interval or trig != last_trigger:
+                    last_trigger = trig
+                    self._refresh(home_ll)
+                    last = time.time()
+                elif home_ll != last_home and qsos:
+                    # the trailer moved: redraw the paths from the new home, no refetch
+                    self._apply([{**q, "home": home_ll} for q in qsos])
+                else:
+                    self._apply(qsos)          # a session ages out on time, not on a fetch
+            except Exception:
+                log.exception("QRZ loop")
+                last = time.time() - idle_s + 30      # piMap: retry in 30 s
+            last_home = home_ll
+            time.sleep(2)
+
+    def snapshot(self) -> dict:
+        with self.lock:
+            return {"version": self.version, "session": self.session,
+                    "qsos": [{"home": q["home"], "dx": q["dx"], "title": q["title"],
+                              "lines": q["lines"], "ts": q["ts"]} for q in self.shown]}
+
+
+qsos_worker = Qsos()
+
+
 def status_tags() -> dict:
     st = applog.get_status()
     out = {}
@@ -316,6 +399,8 @@ def public_config() -> dict:
                    "bar_fraction": c("SPACE_BAR_HEIGHT", 90) / 1080.0,
                    "band_conditions": c("BAND_CONDITIONS_ENABLED", True)},
         "colors": {"qth": c("QTH_COLOR", "#00FF00"), "qso": c("QSO_COLOR", "#FFC800")},
+        "qso": {"dot_radius": c("QSO_DOT_RADIUS", 4), "logbook": c("QRZ_LOGBOOK_NAME", ""),
+                "enabled": bool(c("QRZ_ENABLE", False))},
         "map": {"brightness": c("MAP_BRIGHTNESS", 1.15), "greyline": c("GREYLINE_ENABLED", True),
                 "night_alpha": c("NIGHT_ALPHA", 75), "min_zoom": lo, "max_zoom": hi,
                 "zoom_step": c("ZOOM_STEP", 1.15)},
@@ -373,7 +458,8 @@ def api_state():
                          "tv": {"zoom": tv["zoom"], "settings": tv["settings"], "changed": tv["changed"]},
                          "space_weather": space_wx(), "status": status_tags(),
                          "tle_version": worker.tle_version,
-                         "sats": {"shown": choice.shown, "version": choice.version}, "now": time.time()},
+                         "sats": {"shown": choice.shown, "version": choice.version},
+                         "qso_version": qsos_worker.version, "now": time.time()},
                         headers=NO_STORE)
 
 
@@ -402,6 +488,12 @@ def api_sats():
     return JSONResponse({"sats": rows, "shown": choice.shown, "passes_at": passes.at,
                          "min_elevation": float(get(cfg, "PASS_MIN_ELEVATION", 10.0))},
                         headers=NO_STORE)
+
+
+@app.get("/api/qsos")
+def api_qsos():
+    """The QSOs piMap draws: home, DX (from the grid), callsign, bubble lines, time."""
+    return JSONResponse(qsos_worker.snapshot(), headers=NO_STORE)
 
 
 @app.get("/api/sat/{norad}")
@@ -523,6 +615,7 @@ def _start():
     start_mqtt()
     threading.Thread(target=worker.run, name="refresh", daemon=True).start()
     threading.Thread(target=passes.run, name="passes", daemon=True).start()
+    threading.Thread(target=qsos_worker.run, name="qrz", daemon=True).start()
     sat_radio.preload_async()             # SatNOGS transmitters for the bubbles
 
 

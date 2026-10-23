@@ -16,6 +16,7 @@ import { Tiles } from "./tiles.js";
 import { Night, subsolar, sunElevation } from "./sky.js";
 import { Sats } from "./sats.js";
 import { Borders } from "./borders.js";
+import { Qsos } from "./qsos.js";
 import { setupPanels, loadSettings, DEFAULT_SETTINGS, fmtPass } from "./panels.js";
 
 const TV = document.documentElement.classList.contains("tv");
@@ -26,12 +27,12 @@ const $ = (id) => document.getElementById(id);
 const base = $("base"), over = $("over");
 const bctx = base.getContext("2d", { alpha: false }), octx = over.getContext("2d");
 
-let conf = null, view = null, tiles = null, night = null, sats = null, borders = null;
+let conf = null, view = null, tiles = null, night = null, sats = null, borders = null, qsos = null;
 let state = null, home = null, dpr = 1, u = 1;
 let baseDirty = true, overAt = 0, tleVersion = -1, tvSeen = null;
 let speed = 0, speedAt = 0, changedAt = 0;
 let settings = { ...DEFAULT_SETTINGS }, satsVersion = -1, clockSkew = 0;
-let pointer = null, pinned = null, panels = null, tvSettingsKey = "";   // pointer over the map (CSS px); the pinned bubble's NORAD
+let pointer = null, pinned = null, panels = null, tvSettingsKey = "";   // pointer over the map (CSS px); the pinned bubble's key
 const radio = new Map();             // NORAD -> {lines, note, next_pass, at}          // fastest satellite, device px/s (checked once a second)
 
 // ---- start --------------------------------------------------------------------------
@@ -56,6 +57,7 @@ async function start() {
   view = new View(conf.map.min_zoom, conf.map.max_zoom);
   tiles = new Tiles(conf.pyramid, { maxTiles: TV ? 140 : 180, onLoad: () => { baseDirty = true; } });
   night = conf.map.greyline ? new Night(conf.map.night_alpha) : null;
+  qsos = new Qsos({ color: conf.colors.qso, dot_radius: (conf.qso || {}).dot_radius });
   borders = new Borders(conf.boundaries || { enabled: false }, $("lines"));
   if (borders.conf.enabled) {
     getJSON("api/boundaries").then((d) => { borders.load(d.lines); baseDirty = true; }).catch(() => {});
@@ -100,6 +102,9 @@ function resize() {
 async function poll() {
   try { state = await getJSON("api/state"); } catch (e) { return; }
   clockSkew = state.now * 1000 - Date.now();
+  if (state.qso_version !== undefined && state.qso_version !== qsos.version) {
+    try { qsos.set(await getJSON("api/qsos")); overAt = 0; } catch (e) { /* next poll */ }
+  }
   if (state.sats && state.sats.version !== satsVersion) {
     satsVersion = state.sats.version; sats.show = new Set(state.sats.shown); overAt = 0;
   }
@@ -235,6 +240,8 @@ function drawOver(t) {
   octx.save();                                  // keep satellite drawings on the world
   const L = view.x(-180) * dpr, T = view.y(90) * dpr;
   octx.beginPath(); octx.rect(L, T, view.x(180) * dpr - L, view.y(-90) * dpr - T); octx.clip();
+  if (settings.qsos !== false && !OFF.has("qsos")) qsos.draw(octx, view, dpr, u);
+  else qsos.markers = [];
   if (!OFF.has("sats")) sats.draw(octx, view, dpr, u);
   octx.restore();
   if (!TV) bubble();
@@ -278,27 +285,45 @@ async function radioInfo(norad) {
   overAt = 0;
 }
 
+/** The dot under (x, y) device px: a satellite or a QSO, whichever is nearer. */
+function hitAny(x, y) {
+  const a = settings.qsos !== false ? qsos.hit(x, y) : null, b = sats.hit(x, y);
+  if (!a || !b) return a || (b && { ...b, kind: "sat", key: `sat:${b.norad}` });
+  return Math.hypot(a.x - x, a.y - y) <= Math.hypot(b.x - x, b.y - y) ? a : { ...b, kind: "sat", key: `sat:${b.norad}` };
+}
+
+function findMarker(key) {
+  if (key.startsWith("sat:")) {
+    const m = sats.markers.find((k) => `sat:${k.norad}` === key);
+    return m ? { ...m, kind: "sat", key } : null;
+  }
+  return qsos.markers.find((k) => k.key === key) || null;
+}
+
 function bubble() {
   const el = $("bubble");
-  let m = null;
-  if (pinned !== null) m = sats.markers.find((k) => k.norad === pinned) || null;
-  if (!m && pointer) m = sats.hit(pointer.x * dpr, pointer.y * dpr);
-  if (!m) { if (pinned !== null && !sats.show.has(pinned)) pinned = null; el.hidden = true; return; }
-  radioInfo(m.norad);
-  const info = radio.get(m.norad) || { lines: [], note: "loading radio data..." };
-  const body = info.lines && info.lines.length ? info.lines : [info.note];
-  const next = fmtPass(info.next_pass, (Date.now() + clockSkew) / 1000);
-  const key = `${m.norad}|${body.join("|")}|${Math.round(m.alt)}|${next}|${pinned === m.norad}`;
+  let m = pinned !== null ? findMarker(pinned) : null;
+  if (pinned !== null && !m) pinned = null;                   // its dot went away (unchecked, aged out)
+  if (!m && pointer) m = hitAny(pointer.x * dpr, pointer.y * dpr);
+  if (!m) { el.hidden = true; return; }
+  let title = m.name, body, live = null;
+  if (m.kind === "sat") {
+    radioInfo(m.norad);
+    const info = radio.get(m.norad) || { lines: [], note: "loading radio data..." };
+    body = info.lines && info.lines.length ? info.lines : [info.note];
+    live = `Alt ${Math.round(m.alt)} km   next pass ${fmtPass(info.next_pass, (Date.now() + clockSkew) / 1000)}`;
+  } else {
+    body = m.lines && m.lines.length ? m.lines : [""];                    // piMap's QSO lines
+  }
+  const key = `${m.key}|${body.join("|")}|${live}|${pinned === m.key}`;
   if (el.dataset.key !== key) {
     el.dataset.key = key;
     el.textContent = "";
-    const t = document.createElement("div"); t.className = "title"; t.textContent = m.name; el.appendChild(t);
+    const t = document.createElement("div"); t.className = "title"; t.textContent = title; el.appendChild(t);
     for (const line of body) { const d = document.createElement("div"); d.textContent = line; el.appendChild(d); }
-    const live = document.createElement("div"); live.className = "live";
-    live.textContent = `Alt ${Math.round(m.alt)} km   next pass ${next}`;
-    el.appendChild(live);
+    if (live) { const d = document.createElement("div"); d.className = "live"; d.textContent = live; el.appendChild(d); }
     el.style.borderColor = m.color === "#000" ? "#d2d2d2" : m.color;      // piMap: black ISS -> light grey
-    el.classList.toggle("pinned", pinned === m.norad);
+    el.classList.toggle("pinned", pinned === m.key);
   }
   el.hidden = false;
   // piMap's placement: up and to the right of the dot, flipped to stay on screen
@@ -363,8 +388,8 @@ function wireInput() {
       view.flyTo(conf.map.min_zoom, home.lon, home.lat);          // piMap: right click = reset view
     } else if (drag.button === 0) {
       // piMap: click a dot to pin/unpin its bubble; click empty map to dismiss
-      const p = at(e), m = sats.hit(p.x * dpr, p.y * dpr);
-      pinned = m ? (pinned === m.norad ? null : m.norad) : null;
+      const p = at(e), m = hitAny(p.x * dpr, p.y * dpr);
+      pinned = m ? (pinned === m.key ? null : m.key) : null;
       if (e.pointerType !== "mouse") pointer = m ? p : null;      // touch: a tap shows it
       overAt = 0;
     }

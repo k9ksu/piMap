@@ -9,7 +9,7 @@ const LEAVE_MS = 800;         // grace after the pointer leaves a panel
 const IDLE_MS = 10000;        // close after this long with no pointer movement
 
 const SETTINGS_KEY = "pimap2.settings";
-export const DEFAULT_SETTINGS = { night: true, borders: true, tracks: true, footprints: true };
+export const DEFAULT_SETTINGS = { night: true, borders: true, qsos: true, tracks: true, footprints: true };
 
 export function loadSettings() {
   try { return { ...DEFAULT_SETTINGS, ...JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}") }; }
@@ -74,6 +74,7 @@ export function setupPanels({ sats, settings, onSettings, serverNow, onToggleSat
   const items = [
     ["night", "Night shading (grey line)"],
     ["borders", "Country / state borders"],
+    ["qsos", "QSO paths"],
     ["tracks", "Satellite tracks"],
     ["footprints", "Satellite footprints"],
   ];

@@ -118,6 +118,28 @@ class Api(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.headers["cache-control"], "no-cache")      # updates reach browsers at once
 
+    def test_qsos_session_mode(self):
+        """piMap's session rule through the server: a run of recent QSOs hides old ones."""
+        import calendar
+        now = time.time()
+        def rec(call, grid, mins):
+            t = time.gmtime(now - mins * 60)
+            return {"CALL": call, "GRIDSQUARE": grid, "QSO_DATE": time.strftime("%Y%m%d", t),
+                    "TIME_ON": time.strftime("%H%M%S", t), "BAND": "20m", "MODE": "FT8"}
+        recs = [rec("JA1XYZ", "PM95ut", 3), rec("G4ABC", "IO91wm", 9), rec("W1OLD", "FN42", 600)]
+        import qrz_client
+        qsos = qrz_client.make_qsos_from_qrz(recs, (38.92, -97.21))
+        q = server.Qsos()
+        server.cfg.QRZ_SESSION_WINDOW_MIN = 30
+        q._apply(qsos)
+        snap = q.snapshot()
+        self.assertTrue(snap["session"])
+        self.assertEqual([x["title"] for x in snap["qsos"]], ["JA1XYZ", "G4ABC"])
+        v = snap["version"]
+        q._apply(qsos)
+        self.assertEqual(q.snapshot()["version"], v)                # nothing new: same version
+        self.assertEqual(self.c.get("/api/qsos").status_code, 200)
+
     def test_kiosk_contract(self):
         st = self.c.get("/_fieldlab/status").json()
         self.assertIn(st["state"], ("ready", "degraded", "error"))

@@ -108,7 +108,11 @@ over home, tick to show; the choice is saved on the server so every screen shows
 same set, starting from `SATS_SHOWN`), **left edge** display settings (night shading,
 borders, tracks, footprints; per browser, and on the FieldLab kiosk a second "TV"
 column that sets what the TV draws). Touch screens get edge tabs instead of hover.
-Coming: QSO paths (phase 2); target dots, propagation, sound and spot mode (phase 3).
+**QSO paths** (phase 2): piMap's QRZ loop on the server, unchanged in behaviour (STATUS
+change detection, session mode, adaptive polling, the N3FJP trigger), great-circle
+paths and dots in `QSO_COLOR` drawn by the browser, piMap's QSO bubble on hover/click,
+and a "QSO paths" line in the left menu (and the TV column).
+Coming: target dots, propagation, sound and spot mode (phase 3).
 
 **On the shack Pi** (switches HDMI-2 from the pygame map; `./install2.sh --back` undoes it):
 

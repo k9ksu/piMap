@@ -5,6 +5,7 @@ import { subsolar, sunElevation } from "../web/sky.js";
 import { footprint, splitDateline } from "../web/sats.js";
 import { View } from "../web/view.js";
 import { fmtPass } from "../web/panels.js";
+import { greatCircle } from "../web/qsos.js";
 
 test("sun: declination through the year", () => {
   assert.ok(Math.abs(subsolar(new Date("2026-03-20T14:46:00Z")).lat) < 0.3);         // equinox
@@ -68,4 +69,12 @@ test("panel: piMap's next-pass labels", () => {
   assert.equal(fmtPass(1000 + 30, 1000), "1m");
   assert.equal(fmtPass(1000 + 23 * 60 + 5, 1000), "23m");
   assert.equal(fmtPass(1000 + 76 * 60, 1000), "1h 16m");
+});
+
+test("QSO path: great circle from Kansas to Tokyo", () => {
+  const p = greatCircle({ lat: 38.92, lon: -97.21 }, { lat: 35.81, lon: 139.71 }, 100);
+  assert.equal(p.length, 101);
+  assert.ok(Math.abs(p[0].lat - 38.92) < 1e-9 && Math.abs(p[100].lon - 139.71) < 1e-9);
+  const north = Math.max(...p.map((q) => q.lat));
+  assert.ok(north > 55 && north < 70, `goes up over Alaska: ${north}`);
 });
