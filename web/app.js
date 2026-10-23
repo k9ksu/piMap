@@ -38,7 +38,9 @@ let bubbleHover = false, shownKey = null;
 const HOVER_GRACE_MS = 900;
 const LEAVE_GRACE_MS = 250;          // ...but leaving the bubble itself closes it almost at once
 const FADE_MS = 180;                 // the fade-out (matches #bubble's CSS transition)
-let fadeTimer = 0;
+let fadeTimer = 0, fadeKey = null;
+const DWELL_MS = 400;                // the cursor rests this long on a dot before its bubble shows
+let dwell = null, dwellTimer = 0;
 let lastHover = null, graceTimer = 0;
 let state = null, home = null, dpr = 1, u = 1;
 let baseDirty = true, overAt = 0, tleVersion = -1, tvSeen = null;
@@ -352,7 +354,16 @@ function bubble() {
   if (pinned !== null && !m) pinned = null;                   // its dot went away (unchecked, aged out)
   const now = performance.now();
   if (!m && pointer) {
-    m = hitAny(pointer.x * dpr, pointer.y * dpr);
+    const h = hitAny(pointer.x * dpr, pointer.y * dpr);
+    if (!h) dwell = null;
+    else if (h.key === shownKey || (h.key === fadeKey && el.classList.contains("fading"))) m = h;   // already up
+    else {
+      // A new dot shows its bubble only once the cursor has rested on it, so sweeping
+      // the mouse across the map doesn't pop bubbles.
+      if (!dwell || dwell.key !== h.key) dwell = { key: h.key, t: now };
+      if (now - dwell.t >= DWELL_MS) m = h;
+      else { clearTimeout(dwellTimer); dwellTimer = setTimeout(() => { overAt = 0; }, DWELL_MS - (now - dwell.t) + 20); }
+    }
     if (m) lastHover = { key: m.key, until: now + HOVER_GRACE_MS };   // keeps it while the mouse crosses to it
   }
   if (!m && bubbleHover && shownKey) m = findMarker(shownKey); // piMap: the cursor is inside the bubble: keep it
@@ -362,6 +373,7 @@ function bubble() {
     graceTimer = setTimeout(() => { overAt = 0; }, lastHover.until - now + 20);   // redraw when the grace ends
   }
   if (!m) {
+    if (shownKey) fadeKey = shownKey;
     shownKey = null; bubbleHover = false; lastHover = null; detail = null;
     fadeBubble(el);
     return;
