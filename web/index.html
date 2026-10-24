@@ -61,6 +61,13 @@
   <button id="rzin" aria-label="Zoom in">+</button>
   <label class="follow" title="Keep the TV centred on the trailer's GPS position"><input type="checkbox" id="rfollow" checked> Follow GPS</label>
   <button id="rhome" class="wide" title="Back to the trailer's GPS position (right-click does this too)">⌂ Home</button>
+  <span id="rspeaker" class="speaker" hidden>
+    <span class="label">TV volume</span>
+    <button id="rvdown" aria-label="TV volume down">−</button>
+    <input id="rvol" type="range" min="0" max="100" step="1" aria-label="TV volume">
+    <span id="rvolv">--</span>
+    <button id="rvup" aria-label="TV volume up">+</button>
+  </span>
 </div>
 <script src="web/vendor/satellite.min.js"></script>
 <script type="module" src="web/app.js"></script>

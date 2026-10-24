@@ -47,6 +47,8 @@ let lastHover = null, graceTimer = 0;
 // the remote: when the user last moved the picture, whether that still has to reach the
 // TV, and whether the TV follows GPS (home) or stays where it was put
 let userAt = -1e9, remoteDirty = false, postAt = 0, remoteFollow = true, screenKey = "";
+let testSeen = null;                 // the TV: the last "Test chime on the TV" it played
+let speakerBusyUntil = 0;            // the remote: don't overwrite the TV volume slider while it's being set
 let state = null, home = null, dpr = 1, u = 1;
 let baseDirty = true, overAt = 0, tleVersion = -1, tvSeen = null;
 let speed = 0, speedAt = 0, changedAt = 0;
@@ -108,11 +110,15 @@ async function start() {
       : conf.remote_port ? `${location.protocol}//${location.hostname}:${conf.remote_port}/` : "?mode=remote";
     panels = setupPanels({ sats, settings, onSettings: applySettings, onToggleSat: toggleSat,
                   serverNow: () => (Date.now() + clockSkew) / 1000,
-                  tv: conf.kiosk || REMOTE ? { get: () => state && state.tv.settings, set: setTvSetting } : null,
+                  tv: conf.kiosk || REMOTE ? { get: () => state && state.tv.settings, set: setTvSetting,
+                                               setValue: setTvValue } : null,
                   tvOnly: REMOTE, remoteUrl,
                   sound: conf.targets && conf.targets.wspr_on ? {
                     modes: conf.targets.modes, sounds: conf.targets.sounds, get: () => state && state.prefs,
-                    set: setPrefs, test: () => { chime.unlock(); chime.play(state.prefs.alert_sound, settings.volume ?? 0.8); },
+                    set: setPrefs,
+                    // the remote's test sounds on the TV; anywhere else, here
+                    test: REMOTE ? () => getJSON("api/tv-chime-test", { method: "POST" }).catch(() => {})
+                                 : () => { chime.unlock(); chime.play(state.prefs.alert_sound, settings.volume ?? 0.8); },
                   } : null });
   }
   if (REMOTE) { wireRemote(); document.querySelector("#setpanel h2").textContent = "TV SETTINGS"; }
@@ -183,12 +189,18 @@ function applyTv(tv) {
   if (tvs !== tvSettingsKey) {
     tvSettingsKey = tvs;
     if (TV || REMOTE) {
-      settings = { ...DEFAULT_SETTINGS, volume: conf.targets ? conf.targets.volume : 0.8, ...tv.settings };
+      settings = { ...DEFAULT_SETTINGS, ...tv.settings,
+                   volume: tv.settings.chime_volume ?? (conf.targets ? conf.targets.volume : 0.8) };
       if (REMOTE) settings.chime = false;           // the TV chimes, not the remote
       applySettings(settings);
     }
     if (panels) panels.syncTv(tv.settings);
   }
+  if (TV && tv.test_seq !== undefined) {           // "Test chime on the TV" from the remote
+    if (testSeen !== null && tv.test_seq > testSeen && state.prefs) chime.play(state.prefs.alert_sound, settings.volume ?? 0.8);
+    testSeen = tv.test_seq;
+  }
+  if (REMOTE) showSpeaker(tv.speaker);
   if (REMOTE) {
     const sk = tv.screen ? `${tv.screen.w}x${tv.screen.h}` : "";
     if (sk !== screenKey) { screenKey = sk; resize(); }
@@ -777,8 +789,35 @@ function showRemote() {
   $("rhome").disabled = remoteFollow;
 }
 
+/** The TV's own volume in the remote's bar (only where the kiosk's TV manager is). */
+function showSpeaker(sp) {
+  const box = $("rspeaker");
+  box.hidden = !sp;
+  if (!sp) return;
+  const ok = !!sp.available;
+  for (const id of ["rvdown", "rvup", "rvol"]) $(id).disabled = !ok;
+  box.title = ok ? "The TV's own volume" : "The TV isn't answering right now";
+  if (performance.now() < speakerBusyUntil || document.activeElement === $("rvol")) return;
+  $("rvol").max = String(sp.max || 100);
+  if (sp.volume != null) { $("rvol").value = String(sp.volume); $("rvolv").textContent = String(sp.volume); }
+  else $("rvolv").textContent = "--";
+}
+
+async function sendSpeaker(body) {
+  speakerBusyUntil = performance.now() + 4000;      // the TV manager confirms within a few seconds
+  try {
+    const r = await getJSON("api/tv-speaker", { method: "POST", headers: { "content-type": "application/json" },
+                                                body: JSON.stringify(body) });
+    if (r.ok && r.speaker && r.speaker.volume != null) $("rvolv").textContent = String(r.speaker.volume);
+  } catch (e) { /* the next status shows the truth */ }
+}
+
 function wireRemote() {
   $("remotebar").hidden = false;
+  $("rvol").addEventListener("input", () => { $("rvolv").textContent = $("rvol").value; speakerBusyUntil = performance.now() + 4000; });
+  $("rvol").addEventListener("change", () => sendSpeaker({ volume: Number($("rvol").value) }));
+  $("rvdown").addEventListener("click", () => sendSpeaker({ step: -1 }));
+  $("rvup").addEventListener("click", () => sendSpeaker({ step: 1 }));
   resize();
   const step = () => conf.map.zoom_step || 1.15;
   const zoomBy = (f) => {
@@ -844,6 +883,15 @@ function applySettings(st) {
   sats.tracks = st.tracks;
   sats.footprints = st.footprints && conf.sats.footprint !== false;
   baseDirty = true; overAt = 0;
+}
+
+async function setTvValue(key, value) {
+  try {
+    const r = await getJSON("api/tv-settings", { method: "POST", headers: { "content-type": "application/json" },
+                                                 body: JSON.stringify({ key, value }) });
+    if (r.ok) state.tv.settings = r.settings;
+    return !!r.ok;
+  } catch (e) { return false; }
 }
 
 async function setTvSetting(key, on) {

@@ -126,7 +126,9 @@ the second port `PIMAP_REMOTE_PORT` opens straight on it. It's a live copy of th
 the TV's own shape and settings (the TV reports its size); drag, wheel or pinch it and
 the TV follows within a second. **Follow GPS** keeps the TV centred on home as it moves;
 a pan turns it off and the TV stays where you put it; **⌂ Home** (or right-click) puts it
-back. Its left menu is the TV's settings. The view is saved in `data/tv_view.json`.
+back. Its left menu is the TV's settings. Its **Test chime on the TV** plays
+on the TV, at the TV's own **Chime volume (TV)**. With `PIMAP_TV_PREFIX` (the FieldLab kiosk's
+TV manager on MQTT) its bar also sets the TV's own speaker volume. The view is saved in `data/tv_view.json`.
 
 **On the shack Pi** (switches HDMI-2 from the pygame map; `./install2.sh --back` undoes it):
 

@@ -12,6 +12,8 @@ over as small JSON:
   GET  /tiles/{z}/{x}_{y}.jpg   the pyramid (tools/build_pyramid.py), cached forever
   GET/POST /api/tv-view      what the TV shows: zoom, and centred on home (follow) or a spot
   POST /api/tv-screen        the TV reports its size, so the remote shows its exact picture
+  POST /api/tv-chime-test    the remote's Test chime: played by the TV
+  POST /api/tv-speaker       the TV's own volume, via the kiosk's TV manager (PIMAP_TV_PREFIX)
 
 Home is HOME_LAT/HOME_LON from config.py, unless a GPS fix arrives: on FieldLab from
 MQTT (PIMAP_MQTT_HOST, topic fieldlab/location). Everything else is the same
@@ -144,16 +146,27 @@ def start_mqtt() -> None:
     except ImportError:
         log.warning("PIMAP_MQTT_HOST set but paho-mqtt isn't installed: no GPS home")
         return
+    global mqtt_client
     topic = os.environ.get("PIMAP_GPS_TOPIC", "fieldlab/location")
+    tv_topic = f"{TV_PREFIX}/tv/status" if TV_PREFIX else None
     c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="pimap2")
     c.reconnect_delay_set(1, 30)
-    c.on_connect = lambda client, *a: client.subscribe(topic, qos=1)
+
+    def on_connect(client, *a):
+        client.subscribe(topic, qos=1)
+        if tv_topic:
+            client.subscribe(tv_topic, qos=1)
+    c.on_connect = on_connect
 
     def on_message(client, userdata, msg):
+        if msg.topic == tv_topic:
+            on_tv_status(msg.payload)
+            return
         fix = parse_fix(msg.payload)
         if fix:
             home.set_gps(*fix)
     c.on_message = on_message
+    mqtt_client = c
     c.connect_async(host, int(os.environ.get("PIMAP_MQTT_PORT", "1883")), keepalive=30)
     c.loop_start()
     log.info("following GPS home on %s %s", host, topic)
@@ -216,12 +229,22 @@ def load_tv_settings() -> dict:
     """What the TV draws (the left menu's TV column): all on unless saved otherwise."""
     out = {k: True for k in TV_SETTING_KEYS}
     out["chime"] = bool(get(cfg, "ALERT_SOUND_ENABLED", True))
+    out["chime_volume"] = round(float(get(cfg, "ALERT_VOLUME", 0.8)), 2)    # the chime's loudness on the TV
     try:
         saved = json.loads(TV_SETTINGS_FILE.read_text())
         out.update({k: bool(saved[k]) for k in TV_SETTING_KEYS if k in saved})
+        if "chime_volume" in saved:
+            out["chime_volume"] = _clean_volume(saved["chime_volume"])
     except (OSError, ValueError, TypeError):
         pass
     return out
+
+
+def _clean_volume(v) -> float:
+    v = float(v)
+    if not math.isfinite(v):
+        raise ValueError(v)
+    return round(min(max(v, 0.0), 1.0), 2)
 
 
 def save_tv_settings(st: dict) -> None:
@@ -235,7 +258,31 @@ def save_tv_settings(st: dict) -> None:
 
 
 tv = {**load_tv_view(), "settings": load_tv_settings(), "changed": time.time(),
-      "screen": {"w": 1920, "h": 1080}}          # the TV's size, as the TV reports it (16:9 until then)
+      "screen": {"w": 1920, "h": 1080},          # the TV's size, as the TV reports it (16:9 until then)
+      "test_seq": 0}                             # bumped by "Test chime on the TV"
+
+# The TV's own speaker volume, through the kiosk's TV manager on MQTT (PIMAP_TV_PREFIX,
+# e.g. "fieldlab": reads {prefix}/tv/status, sends "volume ..." to {prefix}/tv/cmd).
+TV_PREFIX = os.environ.get("PIMAP_TV_PREFIX", "").strip().strip("/")
+speaker = {"volume": None, "max": None, "at": 0.0}
+mqtt_client = None
+
+
+def speaker_snapshot() -> dict | None:
+    if not TV_PREFIX:
+        return None
+    fresh = speaker["volume"] is not None and time.time() - speaker["at"] < 180
+    return {"available": fresh and mqtt_client is not None, "volume": speaker["volume"], "max": speaker["max"] or 100}
+
+
+def on_tv_status(payload: bytes) -> None:
+    try:
+        st = json.loads(payload)
+        v, mx = st.get("volume"), st.get("volume_max")
+    except (ValueError, TypeError, AttributeError):
+        return
+    if isinstance(v, int) and isinstance(mx, int) and mx > 0:
+        speaker.update(volume=v, max=mx, at=time.time())
 
 
 def tv_snapshot() -> dict:
@@ -244,7 +291,8 @@ def tv_snapshot() -> dict:
     follow = tv["follow"] or tv["lon"] is None
     centre = {"lon": h["lon"], "lat": h["lat"]} if follow else {"lon": tv["lon"], "lat": tv["lat"]}
     return {"zoom": tv["zoom"], "follow": follow, "centre": centre, "settings": tv["settings"],
-            "changed": tv["changed"], "screen": tv["screen"]}
+            "changed": tv["changed"], "screen": tv["screen"], "test_seq": tv["test_seq"],
+            "speaker": speaker_snapshot()}
 
 
 # ---- background: keep piMap's sources fresh -----------------------------------------
@@ -807,13 +855,17 @@ async def set_tv_settings(request: Request):
     """{key: "borders", on: false}: what the kiosk TV draws."""
     try:
         body = await request.json()
-        key, on = str(body["key"]), bool(body["on"])
-        if key not in TV_SETTING_KEYS:
+        key = str(body["key"])
+        if key == "chime_volume":                          # {key: "chime_volume", value: 0-1}
+            val = _clean_volume(body["value"])
+        elif key in TV_SETTING_KEYS:
+            val = bool(body["on"])
+        else:
             raise ValueError(key)
     except (ValueError, KeyError, TypeError, AttributeError):
-        return JSONResponse({"ok": False, "error": f"expected {{key: one of {list(TV_SETTING_KEYS)}, on: bool}}"},
-                            status_code=400)
-    tv["settings"] = {**tv["settings"], key: on}
+        return JSONResponse({"ok": False, "error": f"expected {{key: one of {list(TV_SETTING_KEYS)}, on: bool}}"
+                                                    " or {key: chime_volume, value: 0-1}"}, status_code=400)
+    tv["settings"] = {**tv["settings"], key: val}
     tv["changed"] = time.time()
     save_tv_settings(tv["settings"])
     return {"ok": True, "settings": tv["settings"]}
@@ -846,6 +898,40 @@ async def set_tv_view(request: Request):
     tv.update(save_tv_view(new))
     tv["changed"] = time.time()
     return {"ok": True, **tv_snapshot()}
+
+
+@app.post("/api/tv-chime-test")
+def tv_chime_test():
+    """The remote's Test chime: the TV plays it (within a second), not the remote."""
+    tv["test_seq"] += 1
+    return {"ok": True, "test_seq": tv["test_seq"]}
+
+
+@app.post("/api/tv-speaker")
+async def set_tv_speaker(request: Request):
+    """The TV's own volume: {volume: 0-100} | {step: 1 | -1} | {mute: true}, via the TV manager."""
+    if not TV_PREFIX or mqtt_client is None:
+        return JSONResponse({"ok": False, "error": "no TV manager here"}, status_code=404)
+    try:
+        body = await request.json()
+        if "volume" in body:
+            n = int(body["volume"])
+            if not 0 <= n <= 100:
+                raise ValueError(n)
+            cmd = f"volume {n}"
+        elif "step" in body:
+            cmd = "volume up" if int(body["step"]) > 0 else "volume down"
+        elif body.get("mute"):
+            cmd = "volume mute"
+        else:
+            raise KeyError
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return JSONResponse({"ok": False, "error": "expected {volume: 0-100}, {step: 1|-1} or {mute: true}"},
+                            status_code=400)
+    mqtt_client.publish(f"{TV_PREFIX}/tv/cmd", cmd, qos=1)
+    if cmd.startswith("volume ") and cmd[7:].isdigit():
+        speaker.update(volume=int(cmd[7:]), at=time.time())    # what it'll be; the TV manager confirms
+    return {"ok": True, "sent": cmd, "speaker": speaker_snapshot()}
 
 
 @app.post("/api/tv-screen")

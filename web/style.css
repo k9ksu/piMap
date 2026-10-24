@@ -71,7 +71,15 @@ html.remote body { position: absolute; height: auto; box-shadow: 0 0 0 1px #3b4d
 #remotebar button:disabled { opacity: .35; cursor: default; }
 #remotebar .follow { display: flex; align-items: center; gap: 6px; cursor: pointer; margin-left: 6px; }
 #remotebar .follow input { accent-color: #d08a3a; width: 16px; height: 16px; }
-@media (max-width: 640px) { #remotebar .sub { display: none; } }
+#remotebar .speaker { display: flex; align-items: center; gap: 6px; margin-left: 10px; padding-left: 14px;
+  border-left: 1px solid #263240; }
+#remotebar .speaker[hidden] { display: none; }
+#remotebar .speaker .label { color: #8fa3b8; }
+#remotebar #rvol { width: 110px; accent-color: #d08a3a; }
+#remotebar #rvol:disabled { opacity: .35; }
+#remotebar #rvolv { min-width: 2em; text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
+@media (max-width: 1150px) { #remotebar .sub { display: none; } }
+@media (max-width: 760px) { #remotebar #rvol { display: none; } }
 #setextra .remotelink { display: block; margin-top: .7em; color: #f0b060; text-decoration: none; }
 #setextra .remotelink:hover { text-decoration: underline; }
 

@@ -86,6 +86,7 @@ export function setupPanels({ sats, settings, onSettings, serverNow, onToggleSat
     ...(sound ? [["chime", "Chime when a path opens"]] : []),
   ];
   const tvBoxes = new Map();
+  let tvVolume = null;                 // the remote's TV chime-volume slider
   let syncPrefs = () => {};
   box.textContent = "";
   const two = !!tv && !tvOnly;
@@ -142,15 +143,19 @@ export function setupPanels({ sats, settings, onSettings, serverNow, onToggleSat
     };
     const modeSel = pick("Spot mode (dot = mode likelihood)", sound.modes, "spot_mode");
     const soundSel = pick("Alert sound", sound.sounds, "alert_sound");
-    if (!tvOnly) {                                   // the remote never chimes itself
-      const vol = document.createElement("label"); vol.className = "row pick";
-      const vt = document.createElement("span"); vt.textContent = "Chime volume (this browser)";
-      const range = document.createElement("input"); range.type = "range"; range.min = "0"; range.max = "1"; range.step = "0.05";
-      range.value = String(settings.volume ?? 0.8);
-      range.addEventListener("change", () => { settings.volume = Number(range.value); saveSettings(settings); });
-      vol.append(vt, range); extra.appendChild(vol);
-    }
-    const test = document.createElement("button"); test.className = "test"; test.textContent = "Test chime";
+    // the chime's loudness: this browser's, or on the remote the TV's (a TV setting)
+    const vol = document.createElement("label"); vol.className = "row pick";
+    const vt = document.createElement("span"); vt.textContent = tvOnly ? "Chime volume (TV)" : "Chime volume (this browser)";
+    const range = document.createElement("input"); range.type = "range"; range.min = "0"; range.max = "1"; range.step = "0.05";
+    range.value = String(tvOnly ? ((tv.get() || {}).chime_volume ?? 0.8) : (settings.volume ?? 0.8));
+    range.addEventListener("change", async () => {
+      if (!tvOnly) { settings.volume = Number(range.value); saveSettings(settings); return; }
+      if (!(await tv.setValue("chime_volume", Number(range.value)))) range.value = String((tv.get() || {}).chime_volume ?? 0.8);
+    });
+    vol.append(vt, range); extra.appendChild(vol);
+    tvVolume = range;
+    const test = document.createElement("button"); test.className = "test";
+    test.textContent = tvOnly ? "Test chime on the TV" : "Test chime";
     test.addEventListener("click", () => sound.test());
     extra.appendChild(test);
     syncPrefs = (p) => { if (p && document.activeElement !== modeSel) modeSel.value = p.spot_mode;
@@ -168,6 +173,9 @@ export function setupPanels({ sats, settings, onSettings, serverNow, onToggleSat
   /** Keep the TV column in step with the server (another browser may change it). */
   function syncTv(st) {
     for (const [key, t] of tvBoxes) if (!t.disabled) t.checked = !!(st || {})[key];
+    if (tvOnly && tvVolume && document.activeElement !== tvVolume && st && st.chime_volume != null) {
+      tvVolume.value = String(st.chime_volume);
+    }
   }
 
   // ---- satellites (right) ----

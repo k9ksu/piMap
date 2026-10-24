@@ -92,6 +92,40 @@ class Api(unittest.TestCase):
         self.assertEqual(d["zoom"], 4.0)
         self.c.post("/api/tv-view", json={"zoom": 1})
 
+    def test_tv_chime_volume_and_test(self):
+        r = self.c.post("/api/tv-settings", json={"key": "chime_volume", "value": 0.35}).json()
+        self.assertEqual(r["settings"]["chime_volume"], 0.35)
+        self.assertEqual(server.load_tv_settings()["chime_volume"], 0.35)             # saved
+        self.assertEqual(self.c.post("/api/tv-settings", json={"key": "chime_volume", "value": "x"}).status_code, 400)
+        seq = self.c.get("/api/tv-view").json()["test_seq"]
+        self.assertEqual(self.c.post("/api/tv-chime-test").json()["test_seq"], seq + 1)
+        self.assertEqual(self.c.get("/api/tv-view").json()["test_seq"], seq + 1)
+
+    def test_tv_speaker(self):
+        """The TV's volume goes to the kiosk TV manager on MQTT; its status says the level."""
+        self.assertIsNone(self.c.get("/api/tv-view").json()["speaker"])             # no TV manager: none
+        self.assertEqual(self.c.post("/api/tv-speaker", json={"volume": 30}).status_code, 404)
+        sent = []
+
+        class FakeMqtt:
+            def publish(self, topic, payload, qos=0):
+                sent.append((topic, payload))
+        old = server.TV_PREFIX, server.mqtt_client
+        server.TV_PREFIX, server.mqtt_client = "fieldlab", FakeMqtt()
+        try:
+            self.assertFalse(self.c.get("/api/tv-view").json()["speaker"]["available"])   # no status yet
+            server.on_tv_status(b'{"state": "ok", "volume": 39, "volume_max": 100}')
+            self.assertEqual(self.c.get("/api/tv-view").json()["speaker"], {"available": True, "volume": 39, "max": 100})
+            self.assertEqual(self.c.post("/api/tv-speaker", json={"volume": 30}).json()["speaker"]["volume"], 30)
+            self.c.post("/api/tv-speaker", json={"step": -1})
+            self.c.post("/api/tv-speaker", json={"mute": True})
+            self.assertEqual(sent, [("fieldlab/tv/cmd", "volume 30"), ("fieldlab/tv/cmd", "volume down"),
+                                    ("fieldlab/tv/cmd", "volume mute")])
+            self.assertEqual(self.c.post("/api/tv-speaker", json={"volume": 101}).status_code, 400)
+            server.on_tv_status(b"junk")                                             # ignored
+        finally:
+            server.TV_PREFIX, server.mqtt_client = old
+
     def test_tv_screen(self):
         self.assertTrue(self.c.post("/api/tv-screen", json={"w": 3840, "h": 2160}).json()["ok"])
         self.assertEqual(self.c.get("/api/tv-view").json()["screen"], {"w": 3840, "h": 2160})
@@ -145,7 +179,7 @@ class Api(unittest.TestCase):
 
     def test_tv_settings(self):
         st = self.c.get("/api/state").json()["tv"]["settings"]
-        self.assertEqual(set(st), set(server.TV_SETTING_KEYS))
+        self.assertEqual(set(st), set(server.TV_SETTING_KEYS) | {"chime_volume"})
         r = self.c.post("/api/tv-settings", json={"key": "borders", "on": False}).json()
         self.assertFalse(r["settings"]["borders"])
         self.assertFalse(server.load_tv_settings()["borders"])           # saved
