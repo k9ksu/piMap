@@ -66,6 +66,22 @@ log = logging.getLogger("pimap2")
 VERSION = "2.0.0-phase1"
 WEB = Path(ROOT) / "web"
 PYRAMID = Path(ROOT) / "data" / "pyramid"
+
+
+def build_id() -> str:
+    """A stamp of what the browser runs (web/ and the tile pyramid's manifest). It changes
+    when piMap 2 is updated, and the TV and the remote reload themselves when it does."""
+    import hashlib
+    h = hashlib.sha1()
+    for f in sorted([*WEB.rglob("*.js"), *WEB.rglob("*.css"), *WEB.rglob("*.html"), PYRAMID / "pyramid.json"]):
+        try:
+            h.update(f.name.encode()); h.update(f.read_bytes())
+        except OSError:
+            pass
+    return h.hexdigest()[:12]
+
+
+BUILD = build_id()
 DATA_DIR = Path(os.environ.get("PIMAP_DATA_DIR", os.path.join(ROOT, "data")))
 VIEW_FILE = DATA_DIR / "tv_view.json"
 KIOSK = os.environ.get("PIMAP_KIOSK", "0") == "1"
@@ -716,7 +732,7 @@ def api_config():
 
 @app.get("/api/state")
 def api_state():
-    return JSONResponse({"home": home.now(),
+    return JSONResponse({"home": home.now(), "build": BUILD,
                          "tv": tv_snapshot(),
                          "space_weather": space_wx(), "status": status_tags(),
                          "tle_version": worker.tle_version,

@@ -47,7 +47,8 @@ let lastHover = null, graceTimer = 0;
 // the remote: when the user last moved the picture, whether that still has to reach the
 // TV, and whether the TV follows GPS (home) or stays where it was put
 let userAt = -1e9, remoteDirty = false, postAt = 0, remoteFollow = true, screenKey = "";
-let testSeen = null;                 // the TV: the last "Test chime on the TV" it played
+let testSeen = null;
+let buildSeen = null;                // the server's build stamp when this page loaded                 // the TV: the last "Test chime on the TV" it played
 let speakerBusyUntil = 0;            // the remote: don't overwrite the TV volume slider while it's being set
 let state = null, home = null, dpr = 1, u = 1;
 let baseDirty = true, overAt = 0, tleVersion = -1, tvSeen = null;
@@ -160,6 +161,11 @@ function resize() {
 async function poll() {
   try { state = await getJSON("api/state"); } catch (e) { return; }
   clockSkew = state.now * 1000 - Date.now();
+  // piMap 2 was updated: the TV and the remote load the new version by themselves
+  if (state.build) {
+    if (buildSeen === null) buildSeen = state.build;
+    else if (state.build !== buildSeen && (TV || REMOTE)) { location.reload(); return; }
+  }
   if (state.qso_version !== undefined && state.qso_version !== qsos.version) {
     try { qsos.set(await getJSON("api/qsos")); overAt = 0; } catch (e) { /* next poll */ }
   }

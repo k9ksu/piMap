@@ -187,6 +187,10 @@ class Api(unittest.TestCase):
         self.assertEqual(self.c.post("/api/tv-settings", json={"key": "nope", "on": True}).status_code, 400)
         self.c.post("/api/tv-settings", json={"key": "borders", "on": True})
 
+    def test_build_stamp(self):
+        b = self.c.get("/api/state").json()["build"]
+        self.assertEqual((len(b), b), (12, server.build_id()))      # same files, same stamp
+
     def test_web_files_revalidate(self):
         r = self.c.get("/web/app.js")
         self.assertEqual(r.status_code, 200)
