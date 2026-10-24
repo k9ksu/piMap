@@ -77,7 +77,8 @@ async function start() {
 
   view = new View(conf.map.min_zoom, conf.map.max_zoom);
   tiles = new Tiles(conf.pyramid, { maxTiles: TV ? 140 : 180, onLoad: () => { baseDirty = true; } });
-  night = conf.map.greyline ? new Night(conf.map.night_alpha) : null;
+  // NIGHT_ALPHA as piMap; on toned tiles (deep oceans, no grey wash) 1.5x, so the grey line still shows
+  night = conf.map.greyline ? new Night(Math.min(255, conf.map.night_alpha * (conf.pyramid && conf.pyramid.tone ? 1.5 : 1))) : null;
   qsos = new Qsos({ color: conf.colors.qso, dot_radius: (conf.qso || {}).dot_radius });
   targets = new Targets(conf.targets || {});
   borders = new Borders(conf.boundaries || { enabled: false }, $("lines"));
@@ -295,7 +296,8 @@ function drawBase() {
   bctx.fillStyle = "#000"; bctx.fillRect(0, 0, base.width, base.height);
   bctx.imageSmoothingEnabled = true; bctx.imageSmoothingQuality = "high";
   if (!OFF.has("tiles")) tiles.draw(bctx, view, dpr);
-  if (!OFF.has("bright")) brighten(bctx, conf.map.brightness);
+  // tiles built with a tone already carry that much brightness; add only what's asked beyond it
+  if (!OFF.has("bright")) brighten(bctx, conf.map.brightness / (conf.pyramid.tone || 1));
   if (night && settings.night && !OFF.has("night")) night.draw(bctx, view, dpr);
   $("note").hidden = true;
 }

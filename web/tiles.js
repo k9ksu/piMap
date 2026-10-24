@@ -55,7 +55,7 @@ export class Tiles {
         img.decode ? img.decode().then(done, done) : done();
       };
       img.onerror = () => { this.loading--; this.cache.delete(this._key(e.z, e.x, e.y)); this._pump(); };
-      img.src = `tiles/${e.z}/${e.x}_${e.y}.jpg`;
+      img.src = `tiles/${e.z}/${e.x}_${e.y}.jpg${this.p.version ? `?v=${this.p.version}` : ""}`;   // new finish, new URL
     }
   }
 
